@@ -1,0 +1,6 @@
+# Mandatory runtime dependencies (all free / open source; tested together on Python 3.12).
+# Enough to run the whole project in clearly labelled TEST MODE with no LLM.
+langchain-core==1.6.12
+requests==2.34.2
+numpy==2.5.4
+python-dotenv==1.2.4

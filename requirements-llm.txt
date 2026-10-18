@@ -1,0 +1,9 @@
+# Free local LLM support via Ollama (https://ollama.com). No account, no API key, no billing.
+# This installs only the small Python client; the Ollama app and the model are installed separately.
+# Needed only when LLM_PROVIDER=ollama. Tested against a FAKE Ollama server, not yet against real Ollama.
+langchain-ollama==1.1.0
+ollama==0.6.3
+
+# ---- Optional extra (NOT in this file's install, large download): PyTorch-based embeddings ----
+#   pip install sentence-transformers          (free; set EMBEDDING_BACKEND=sentence-transformers)
+# Lighter alternative: EMBEDDING_BACKEND=ollama (uses Ollama, no PyTorch).
