@@ -150,3 +150,32 @@ def test_cli_status_and_empty_search(tmp_path, monkeypatch, capsys):
     assert main(["run", "--topic", "anything"]) == 0
     out = capsys.readouterr().out
     assert "TEST MODE" in out and "NO_EVIDENCE" in out
+
+# ------------------------------------------------------------- truncated / untraceable model output
+def test_unclosed_code_fence_is_detected_and_cleaned():
+    from src.agents.code_executor import is_truncated
+    raw = "```python\nimport torch\ndef f():\n    # cut off"
+    assert is_truncated(raw) and not is_truncated("```python\nprint(1)\n```")
+    assert extract_code(raw).startswith("import torch")      # fence marker removed
+
+
+def test_third_party_imports_are_flagged_even_when_code_does_not_parse():
+    ok, _, warnings = analyse_code("import torch\nimport numpy\nimport json\ndef f():\n    # cut off")
+    assert not ok
+    assert any("torch" in w for w in warnings)
+    assert not any("numpy" in w or "json" in w for w in warnings)
+
+
+def test_workflow_warns_about_untraceable_and_truncated_output(workflow):
+    fake = FakeListChatModel(responses=[
+        "A summary with no citations.",
+        "HYPOTHESIS: h\nRATIONALE: r\nTEST PLAN: p",
+        "```python\nimport torch\nx = (",
+    ])
+    workflow.reviewer = LiteratureReviewerAgent(fake)
+    workflow.hypothesis_agent = HypothesisGeneratorAgent(fake)
+    workflow.executor = CodeExecutorAgent(fake)
+    text = " | ".join(workflow.run("graph neural networks").warnings)
+    assert "Reviewer cited no retrieved paper" in text
+    assert "Hypothesis cited no retrieved paper" in text
+    assert "cut off" in text and "torch" in text

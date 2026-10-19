@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -23,13 +24,16 @@ SYSTEM = (
     "You write small, self-contained Python 3 experiment scripts. Rules: standard library only (plus numpy if "
     "essential); no network access; no reading environment variables; no file writes except under /tmp; "
     "set random seeds; print the final results as a single JSON object to stdout; label any synthetic data as "
-    "synthetic. Reply with exactly one ```python code block and nothing else."
+    "synthetic. Keep the script SHORT (under 60 lines). Reply with exactly one ```python code block and nothing else."
 )
 HUMAN = "Hypothesis: {hypothesis}\n\nTest plan: {test_plan}"
 
 PENDING_STATUS = "PENDING - sandbox execution is not available until Week 2 (Docker)"
 _FENCE_RE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
+_OPEN_FENCE_RE = re.compile(r"```(?:python|py)?[ \t]*\n(.*)\Z", re.DOTALL)   # fence never closed
 _RISKY_MODULES = {"os", "subprocess", "socket", "shutil", "ctypes", "requests", "urllib", "http", "sys"}
+_ALLOWED_THIRD_PARTY = {"numpy"}              # the only non-standard library the prompt permits
+_STDLIB = set(sys.stdlib_module_names)        # Python 3.10+
 
 
 @dataclass
@@ -38,30 +42,50 @@ class ExperimentPlan:
     syntax_ok: bool
     syntax_error: Optional[str] = None
     advisory_warnings: List[str] = field(default_factory=list)   # NOT a security control
+    truncated: bool = False                                      # model output was cut off mid-code
     execution_status: str = PENDING_STATUS
 
 
+def is_truncated(text: str) -> bool:
+    """True when a code fence was opened but never closed (typically the token limit was hit)."""
+    return _FENCE_RE.search(text) is None and _OPEN_FENCE_RE.search(text) is not None
+
+
 def extract_code(text: str) -> str:
-    """Return the first fenced code block, or the raw text if no fence is present."""
-    match = _FENCE_RE.search(text)
-    return (match.group(1) if match else text).strip()
+    """Return the first fenced code block (or the unfinished one), else the raw text."""
+    for pattern in (_FENCE_RE, _OPEN_FENCE_RE):
+        match = pattern.search(text)
+        if match:
+            return match.group(1).strip()
+    return text.strip()
+
+
+def _imported_modules(code: str, tree: Optional[ast.AST]) -> List[str]:
+    if tree is None:    # code does not parse (e.g. truncated): fall back to a simple line scan
+        return re.findall(r"^\s*(?:from|import)\s+([A-Za-z_]\w*)", code, re.MULTILINE)
+    names: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names.append(node.module.split(".")[0])
+    return names
 
 
 def analyse_code(code: str) -> tuple[bool, Optional[str], List[str]]:
-    """Syntax check + advisory scan for risky imports. The sandbox, not this scan, provides safety."""
+    """Syntax check + advisory import scan. The sandbox, not this scan, provides safety."""
     try:
-        tree = ast.parse(code)
+        tree: Optional[ast.AST] = ast.parse(code)
+        ok, error = True, None
     except SyntaxError as exc:
-        return False, f"{exc.msg} (line {exc.lineno})", []
-    warnings = []
-    for node in ast.walk(tree):
-        names = []
-        if isinstance(node, ast.Import):
-            names = [a.name.split(".")[0] for a in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names = [node.module.split(".")[0]]
-        warnings += [f"imports '{n}' (review before running)" for n in names if n in _RISKY_MODULES]
-    return True, None, sorted(set(warnings))
+        tree, ok, error = None, False, f"{exc.msg} (line {exc.lineno})"
+    warnings: List[str] = []
+    for name in sorted(set(_imported_modules(code, tree))):
+        if name in _RISKY_MODULES:
+            warnings.append(f"imports '{name}' (review before running)")
+        elif name not in _STDLIB and name not in _ALLOWED_THIRD_PARTY:
+            warnings.append(f"imports '{name}', which is not standard library and may be missing in the sandbox")
+    return ok, error, warnings
 
 
 class CodeExecutorAgent:
@@ -78,4 +102,5 @@ class CodeExecutorAgent:
             raise AgentError(f"Code Executor model call failed: {exc}") from exc
         code = extract_code(raw)
         ok, error, warnings = analyse_code(code)
-        return ExperimentPlan(code=code, syntax_ok=ok, syntax_error=error, advisory_warnings=warnings)
+        return ExperimentPlan(code=code, syntax_ok=ok, syntax_error=error,
+                              advisory_warnings=warnings, truncated=is_truncated(raw))

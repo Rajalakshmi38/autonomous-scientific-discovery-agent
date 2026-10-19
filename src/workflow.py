@@ -98,6 +98,8 @@ class ResearchWorkflow:
         state["review"] = self.reviewer.run(state["topic"], state["evidence"])
         if state["review"].unknown_citations:
             state["warnings"].append(f"Reviewer cited unretrieved ids: {state['review'].unknown_citations}")
+        if not state["review"].cited_ids:
+            state["warnings"].append("Reviewer cited no retrieved paper by id, so its claims are not traceable.")
         return state
 
     def _step_hypothesis(self, state: dict) -> dict:
@@ -106,14 +108,20 @@ class ResearchWorkflow:
         state["hypothesis"] = self.hypothesis_agent.run(state["topic"], state["review"], state["evidence"])
         if state["hypothesis"].unknown_citations:
             state["warnings"].append(f"Hypothesis cited unretrieved ids: {state['hypothesis'].unknown_citations}")
+        if not state["hypothesis"].cited_ids:
+            state["warnings"].append("Hypothesis cited no retrieved paper by id, so it is not traceable to evidence.")
         return state
 
     def _step_experiment(self, state: dict) -> dict:
         if state.get("stop"):
             return state
         state["experiment"] = self.executor.prepare_experiment(state["hypothesis"])
-        if not state["experiment"].syntax_ok:
-            state["warnings"].append(f"Generated code has a syntax error: {state['experiment'].syntax_error}")
+        exp = state["experiment"]
+        if exp.truncated:
+            state["warnings"].append("Generated code looks cut off (token limit reached). Raise LLM_MAX_TOKENS in .env.")
+        if not exp.syntax_ok:
+            state["warnings"].append(f"Generated code has a syntax error: {exp.syntax_error}")
+        state["warnings"].extend(f"Code check: {w}" for w in exp.advisory_warnings)
         return state
 
     # ---- public -------------------------------------------------------------
