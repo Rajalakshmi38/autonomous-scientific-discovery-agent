@@ -44,6 +44,18 @@ class Settings:
     arxiv_retries: int = 3
     arxiv_delay_seconds: float = 3.0
 
+    # ---- Week 2: RAG, sandbox, repair loop --------------------------------
+    context_char_budget: int = 6000     # max characters of paper text given to a prompt
+    citation_retries: int = 1           # extra tries when an answer cites no retrieved paper
+    max_repair_retries: int = 2         # code-repair retries after a failed run (total runs = 1 + this)
+    docker_command: str = "docker"
+    sandbox_image: str = "asda-sandbox:latest"
+    sandbox_timeout_seconds: float = 30.0
+    sandbox_memory_mb: int = 256
+    sandbox_cpus: float = 1.0
+    sandbox_pids_limit: int = 64
+    sandbox_max_output_kb: int = 64
+
     storage_dir: Path = PROJECT_ROOT / "storage"
     data_dir: Path = PROJECT_ROOT / "data"
     log_level: str = "INFO"
@@ -113,7 +125,39 @@ def load_settings(
     if retries < 1:
         raise ConfigError("ARXIV_RETRIES must be >= 1")
 
+    context_budget = _num(env, "CONTEXT_CHAR_BUDGET", 6000, int)
+    if context_budget < 1000:
+        raise ConfigError("CONTEXT_CHAR_BUDGET must be >= 1000")
+    cit_retries = _num(env, "CITATION_RETRIES", 1, int)
+    repairs = _num(env, "MAX_REPAIR_RETRIES", 2, int)
+    if not 0 <= cit_retries <= 3:
+        raise ConfigError("CITATION_RETRIES must be between 0 and 3")
+    if not 0 <= repairs <= 5:
+        raise ConfigError("MAX_REPAIR_RETRIES must be between 0 and 5")
+    sandbox_timeout = _num(env, "SANDBOX_TIMEOUT_SECONDS", 30.0, float)
+    sandbox_memory = _num(env, "SANDBOX_MEMORY_MB", 256, int)
+    sandbox_pids = _num(env, "SANDBOX_PIDS_LIMIT", 64, int)
+    sandbox_cpus = _num(env, "SANDBOX_CPUS", 1.0, float)
+    if sandbox_timeout <= 0 or sandbox_timeout > 600:
+        raise ConfigError("SANDBOX_TIMEOUT_SECONDS must be between 0 and 600")
+    if sandbox_memory < 64:
+        raise ConfigError("SANDBOX_MEMORY_MB must be >= 64")
+    if sandbox_pids < 8:
+        raise ConfigError("SANDBOX_PIDS_LIMIT must be >= 8")
+    if sandbox_cpus <= 0:
+        raise ConfigError("SANDBOX_CPUS must be > 0")
+
     return Settings(
+        context_char_budget=context_budget,
+        citation_retries=cit_retries,
+        max_repair_retries=repairs,
+        docker_command=env.get("DOCKER_COMMAND", "docker").strip() or "docker",
+        sandbox_image=env.get("SANDBOX_IMAGE", "asda-sandbox:latest").strip(),
+        sandbox_timeout_seconds=sandbox_timeout,
+        sandbox_memory_mb=sandbox_memory,
+        sandbox_cpus=sandbox_cpus,
+        sandbox_pids_limit=sandbox_pids,
+        sandbox_max_output_kb=_num(env, "SANDBOX_MAX_OUTPUT_KB", 64, int),
         llm_provider=provider,
         ollama_model=env.get("OLLAMA_MODEL", "llama3.2:3b"),
         ollama_base_url=env.get("OLLAMA_BASE_URL", "http://localhost:11434"),
