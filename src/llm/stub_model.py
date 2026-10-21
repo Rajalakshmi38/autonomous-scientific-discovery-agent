@@ -72,6 +72,6 @@ class RuleBasedStubChatModel(BaseChatModel):
                 f"RATIONALE: Placeholder; evidence papers listed: {cites}.\n"
                 "TEST PLAN: Generate synthetic data, compare two simple estimators, report the metric difference."
             )
-        if "[TASK:EXPERIMENT_CODE]" in prompt:
+        if "[TASK:EXPERIMENT_CODE]" in prompt or "[TASK:EXPERIMENT_REPAIR]" in prompt:
             return f"```python\n{_STUB_SCRIPT}```"
         return f"{TEST_MODE_LABEL} Unrecognised task."
