@@ -98,6 +98,7 @@ def recommend(info: SystemInfo) -> Recommendation:
     if info.ram_gb is None:
         return Recommendation("unknown", "Could not detect RAM. Start with a ~3B model; use mock mode if it fails.",
                               ["llama3.2:3b"])
+    # Windows reports usable RAM: 8 GB installed shows ~7.3, 16 GB shows ~15.x. Thresholds allow for that.
     if info.ram_gb >= 15:
         return Recommendation(
             "medium",
@@ -108,7 +109,8 @@ def recommend(info: SystemInfo) -> Recommendation:
     if info.ram_gb >= 7:
         return Recommendation(
             "small",
-            f"{info.ram_gb} GB RAM: stick to 1-3B models and close other heavy apps. Output quality will be modest.",
+            f"{info.ram_gb} GB RAM: stick to 1-3B models and close other heavy apps (browser tabs, etc.). "
+            "Without a GPU it runs on the CPU: workable but slow, and output quality will be modest.",
             ["llama3.2:3b", "llama3.2:1b"],
         )
     return Recommendation(
