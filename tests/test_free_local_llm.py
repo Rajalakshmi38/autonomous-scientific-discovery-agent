@@ -171,7 +171,7 @@ def test_parse_nvidia_smi():
 
 @pytest.mark.parametrize(
     "ram,vram,tier",
-    [(4, None, "mock-only"), (8, None, "small"), (16, None, "medium"), (32, 8, "large"), (None, None, "unknown")],
+    [(4, None, "mock-only"), (6.5, None, "mock-only"), (7.3, None, "small"), (8, None, "small"), (15.4, None, "medium"), (16, None, "medium"), (32, 8, "large"), (None, None, "unknown")],
 )
 def test_recommendation_tiers(ram, vram, tier):
     assert recommend(SystemInfo("x", 4, ram, "gpu" if vram else None, vram)).tier == tier
