@@ -116,7 +116,7 @@ def workflow(tmp_path):
 
 def test_workflow_end_to_end_test_mode(workflow, tmp_path):
     result = workflow.run("graph neural networks")
-    assert result.status == "COMPLETED_WEEK1"
+    assert result.status == "COMPLETED"
     assert result.evidence[0].paper.uid == "arxiv:1"
     assert result.experiment.syntax_ok
     data = result.to_dict()
@@ -151,6 +151,7 @@ def test_cli_status_and_empty_search(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "TEST MODE" in out and "NO_EVIDENCE" in out
 
+
 # ------------------------------------------------------------- truncated / untraceable model output
 def test_unclosed_code_fence_is_detected_and_cleaned():
     from src.agents.code_executor import is_truncated
@@ -172,8 +173,8 @@ def test_workflow_warns_about_untraceable_and_truncated_output(workflow):
         "HYPOTHESIS: h\nRATIONALE: r\nTEST PLAN: p",
         "```python\nimport torch\nx = (",
     ])
-    workflow.reviewer = LiteratureReviewerAgent(fake)
-    workflow.hypothesis_agent = HypothesisGeneratorAgent(fake)
+    workflow.reviewer = LiteratureReviewerAgent(fake, citation_retries=0)       # no retry: keep the scripted order
+    workflow.hypothesis_agent = HypothesisGeneratorAgent(fake, citation_retries=0)
     workflow.executor = CodeExecutorAgent(fake)
     text = " | ".join(workflow.run("graph neural networks").warnings)
     assert "Reviewer cited no retrieved paper" in text

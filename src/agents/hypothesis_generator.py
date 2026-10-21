@@ -14,7 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-from src.agents.base import AgentError, format_evidence, split_citations
+from src.agents.base import AgentError, format_evidence, generate_with_citation_retry
 from src.agents.literature_reviewer import LiteratureReview
 from src.models import RetrievedPaper
 
@@ -31,7 +31,7 @@ SYSTEM = (
     "TEST PLAN: <a minimal experiment, the metric, and what result would refute the hypothesis>"
 )
 HUMAN = (
-    "Topic: {topic}\n\nLiterature summary:\n{summary}\n\n<papers>\n{papers}\n</papers>"
+    "Topic: {topic}\n\nLiterature summary:\n{summary}\n\n<papers>\n{papers}\n</papers>\n\n{reminder}"
 )
 
 
@@ -43,6 +43,7 @@ class Hypothesis:
     raw_text: str
     cited_ids: List[str] = field(default_factory=list)
     unknown_citations: List[str] = field(default_factory=list)
+    citation_retries_used: int = 0
 
 
 def parse_hypothesis_text(text: str) -> tuple[str, str, str]:
@@ -58,21 +59,26 @@ def parse_hypothesis_text(text: str) -> tuple[str, str, str]:
 
 
 class HypothesisGeneratorAgent:
-    def __init__(self, llm: BaseChatModel) -> None:
+    def __init__(self, llm: BaseChatModel, citation_retries: int = 1) -> None:
+        self.citation_retries = citation_retries
         prompt = ChatPromptTemplate.from_messages([("system", SYSTEM), ("human", HUMAN)])
         self._chain = prompt | llm | StrOutputParser()
 
     def run(self, topic: str, review: LiteratureReview, evidence: List[RetrievedPaper]) -> Hypothesis:
         if not evidence:
             raise ValueError("Hypothesis generation needs retrieved evidence.")
+        papers = format_evidence(evidence)
+
+        def invoke(reminder: str) -> str:
+            return self._chain.invoke(
+                {"topic": topic, "summary": review.summary, "papers": papers, "reminder": reminder})
+
         try:
-            raw = self._chain.invoke(
-                {"topic": topic, "summary": review.summary, "papers": format_evidence(evidence)}
-            )
+            raw, valid, unknown, used = generate_with_citation_retry(
+                invoke, (e.paper.uid for e in evidence), self.citation_retries)
         except Exception as exc:
             raise AgentError(f"Hypothesis Generator model call failed: {exc}") from exc
         statement, rationale, plan = parse_hypothesis_text(raw)
-        valid, unknown = split_citations(raw, (e.paper.uid for e in evidence))
         if unknown:
             logger.warning("Hypothesis cited ids that were not retrieved: %s", unknown)
-        return Hypothesis(statement, rationale, plan, raw.strip(), valid, unknown)
+        return Hypothesis(statement, rationale, plan, raw.strip(), valid, unknown, used)

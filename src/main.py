@@ -4,7 +4,8 @@ Commands (run from the project root):
     python -m src.main status
     python -m src.main ingest  --query "graph neural networks" --max-results 10
     python -m src.main search  --query "graph neural networks" -k 5
-    python -m src.main run     --topic "graph neural networks"
+    python -m src.main run     --topic "graph neural networks" [--no-execute]
+    python -m src.main sandbox-build | sandbox-status | sandbox-test
     python -m src.main reindex
     python -m src.main check-system     # can my PC run a local LLM?
     python -m src.main check-llm        # is Ollama running and the model pulled?
@@ -17,10 +18,12 @@ import logging
 import sys
 from typing import Optional, Sequence
 
-from config.settings import ConfigError, Settings, load_settings
+from config.settings import PROJECT_ROOT, ConfigError, Settings, load_settings
 from src.agents.code_executor import CodeExecutorAgent
 from src.agents.hypothesis_generator import HypothesisGeneratorAgent
 from src.agents.literature_reviewer import LiteratureReviewerAgent
+from src.execution.sandbox import DockerSandbox, SandboxConfig, Status
+from src.execution.self_test import run_self_test
 from src.ingestion.arxiv_client import ArxivClient
 from src.ingestion.base import IngestionError
 from src.ingestion.paper_store import PaperStore
@@ -51,8 +54,44 @@ def cmd_status(settings: Settings, _args) -> int:
     print(f"Vectors indexed   : {retriever.vector_store.count()}")
     if get_provider_spec(settings.llm_provider).needs_local_server:
         print(f"Ollama server     : {check_ollama(settings.ollama_base_url, settings.ollama_model).message}")
-    print("Sandbox execution : NOT AVAILABLE (Week 2)")
+    print(f"Docker sandbox    : {make_sandbox(settings).check_available().message}")
     store.close()
+    return 0
+
+
+def make_sandbox(settings: Settings) -> DockerSandbox:
+    return DockerSandbox(SandboxConfig.from_settings(settings))
+
+
+def cmd_sandbox_build(settings: Settings, _args) -> int:
+    print(f"Building image '{settings.sandbox_image}' (first time takes a few minutes; needs internet)...")
+    code = make_sandbox(settings).build_image(PROJECT_ROOT / "sandbox")
+    print("Image built. Next: python -m src.main sandbox-test" if code == 0 else f"Build failed (exit code {code}).")
+    return 0 if code == 0 else 1
+
+
+def cmd_sandbox_status(settings: Settings, _args) -> int:
+    status = make_sandbox(settings).check_available()
+    print(status.message)
+    return 0 if status.ok else 1
+
+
+def cmd_sandbox_test(settings: Settings, _args) -> int:
+    sandbox = make_sandbox(settings)
+    status = sandbox.check_available()
+    if not status.ok:
+        print(f"Cannot test the sandbox: {status.message}")
+        return 1
+    print("Running restriction probes inside the sandbox (about 1 minute)...\n")
+    results = run_self_test(sandbox)
+    for r in results:
+        print(f"[{'PASS' if r.passed else 'FAIL'}] {r.name:22s} {r.what}\n       {r.detail}")
+    failed = [r.name for r in results if not r.passed]
+    if failed:
+        print(f"\n{len(failed)} probe(s) FAILED: {', '.join(failed)}. Do NOT treat the sandbox as secure.")
+        return 1
+    print("\nAll probes passed. The restrictions above work on this machine.")
+    print("This is evidence, not a guarantee: keep running only code you accept the risk of running in a container.")
     return 0
 
 
@@ -155,13 +194,17 @@ def cmd_run(settings: Settings, args) -> int:
     store, retriever = build_retriever(settings)
     try:
         llm = get_llm(settings)
+        sandbox = None if args.no_execute else make_sandbox(settings)
         workflow = ResearchWorkflow(
             retriever=retriever,
-            reviewer=LiteratureReviewerAgent(llm),
-            hypothesis_agent=HypothesisGeneratorAgent(llm),
+            reviewer=LiteratureReviewerAgent(llm, settings.citation_retries),
+            hypothesis_agent=HypothesisGeneratorAgent(llm, settings.citation_retries),
             executor=CodeExecutorAgent(llm),
             llm_mode=describe_llm(settings),
             top_k=args.k,
+            sandbox=sandbox,
+            max_repairs=settings.max_repair_retries,
+            char_budget=settings.context_char_budget,
         )
         result = workflow.run(args.topic)
     finally:
@@ -169,15 +212,37 @@ def cmd_run(settings: Settings, args) -> int:
 
     path = result.save(settings.runs_dir)
     print(f"\nStatus: {result.status}   (LLM: {result.llm_mode})")
+    print(f"Execution: {result.execution_status}")
     for w in result.warnings:
         print(f"WARNING: {w}")
-    if result.status == "COMPLETED_WEEK1":
-        print("\n--- Evidence ---")
+    if result.status == "COMPLETED":
+        print("\n--- Evidence retrieved ---")
         for e in result.evidence:
             print(f"[{e.paper.uid}] {e.paper.title[:80]}  score={e.score:.3f}\n    {e.paper.url}")
         print(f"\n--- Literature review ---\n{result.review.summary}")
         print(f"\n--- Hypothesis ---\n{result.hypothesis.statement}")
-        print(f"\n--- Experiment code (NOT executed; sandbox pending Week 2) ---\n{result.experiment.code}")
+        print("\n--- Sources cited by the hypothesis ---")
+        if result.sources:
+            for src in result.sources:
+                print(f"[{src.id}] {src.title[:80]}\n    {src.url}")
+        else:
+            print("(none: the hypothesis is not traceable to the retrieved papers)")
+        print(f"\n--- Experiment code (first version) ---\n{result.experiment.code}")
+        if result.execution and result.execution.attempts:
+            print("\n--- Sandbox execution ---")
+            for a in result.execution.attempts:
+                r = a.result
+                print(f"Attempt {a.number}: {r.status} (exit {r.exit_code}, {r.duration_seconds}s) {r.message}")
+                if a.note:
+                    print(f"  note: {a.note}")
+            last = result.execution.final_result
+            if last.stdout.strip():
+                print(f"\nOutput of the last run:\n{last.stdout.strip()[:2000]}")
+            if last.stderr.strip() and not last.ok:
+                print(f"\nError output of the last run:\n{last.stderr.strip()[-1500:]}")
+            if last.ok:
+                print("\nNote: these numbers come from model-written code. They are real outputs of that code, "
+                      "not verified research findings.")
     print(f"\nSaved run record: {path}")
     return 0
 
@@ -204,10 +269,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-k", type=int, default=5, help="papers to retrieve (use 3 with small local models)")
     p.add_argument("--provider", choices=available_providers(), default=None,
                    help="override LLM_PROVIDER for this run")
+    p.add_argument("--no-execute", action="store_true", help="prepare the code but do not run it in the sandbox")
     p.set_defaults(func=cmd_run)
 
     sub.add_parser("check-system", help="report RAM/GPU and what size of local LLM is realistic").set_defaults(func=cmd_check_system)
     sub.add_parser("check-llm", help="check that the configured LLM provider is usable").set_defaults(func=cmd_check_llm)
+    sub.add_parser("sandbox-build", help="build the Docker sandbox image (once)").set_defaults(func=cmd_sandbox_build)
+    sub.add_parser("sandbox-status", help="is Docker running and the image built?").set_defaults(func=cmd_sandbox_status)
+    sub.add_parser("sandbox-test", help="verify the sandbox restrictions on real Docker").set_defaults(func=cmd_sandbox_test)
     sub.add_parser("reindex", help="rebuild the vector index from stored papers").set_defaults(func=cmd_reindex)
     return parser
 

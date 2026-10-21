@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Sequence, Tuple
+from typing import Callable, Iterable, List, Sequence, Tuple
 
 from src.models import RetrievedPaper
 
@@ -41,3 +41,27 @@ def format_evidence(items: Sequence[RetrievedPaper], max_abstract_chars: int = 1
             f"Abstract: {abstract}"
         )
     return "\n\n".join(blocks)
+
+
+CITATION_REMINDER = (
+    "IMPORTANT: your previous answer cited no retrieved paper. Cite at least one of the papers above using its "
+    "bracketed identifier exactly as shown, for example [arxiv:2401.00001]. Do not cite by title."
+)
+
+
+def generate_with_citation_retry(
+    invoke: Callable[[str], str], allowed_ids: Iterable[str], retries: int
+) -> Tuple[str, List[str], List[str], int]:
+    """Call ``invoke(reminder)``; if the text cites no retrieved paper, retry up to ``retries`` times.
+
+    Returns (text, valid_ids, unknown_ids, retries_used). This is a bounded retry, not learning.
+    """
+    allowed = list(allowed_ids)
+    text = invoke("")
+    valid, unknown = split_citations(text, allowed)
+    used = 0
+    while not valid and used < retries:
+        used += 1
+        text = invoke(CITATION_REMINDER)
+        valid, unknown = split_citations(text, allowed)
+    return text, valid, unknown, used
