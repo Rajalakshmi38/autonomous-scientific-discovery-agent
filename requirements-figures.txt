@@ -1,0 +1,5 @@
+# Optional: reading figures from paper PDFs (the `figures` command). All three are permissively licensed.
+# (PyMuPDF is deliberately NOT used: it is AGPL-licensed.)
+pypdf==6.21.2
+pypdfium2==5.14.0
+pillow==13.0.0

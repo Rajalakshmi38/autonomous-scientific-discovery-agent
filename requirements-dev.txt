@@ -1,3 +1,5 @@
 -r requirements.txt
 -r requirements-llm.txt
+-r requirements-figures.txt
+scikit-learn==1.9.1     # only so the tests can run the experiment template on this machine (the sandbox image has its own copy)
 pytest==9.1.1

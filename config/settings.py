@@ -44,17 +44,23 @@ class Settings:
     arxiv_retries: int = 3
     arxiv_delay_seconds: float = 3.0
 
-    # ---- Week 2: RAG, sandbox, repair loop --------------------------------
+    # ---- RAG, sandbox, repair loop --------------------------------
     context_char_budget: int = 6000     # max characters of paper text given to a prompt
     citation_retries: int = 1           # extra tries when an answer cites no retrieved paper
     max_repair_retries: int = 2         # code-repair retries after a failed run (total runs = 1 + this)
     docker_command: str = "docker"
     sandbox_image: str = "asda-sandbox:latest"
-    sandbox_timeout_seconds: float = 30.0
-    sandbox_memory_mb: int = 256
+    sandbox_timeout_seconds: float = 60.0
+    sandbox_memory_mb: int = 512
     sandbox_cpus: float = 1.0
     sandbox_pids_limit: int = 64
     sandbox_max_output_kb: int = 64
+    critic_alpha: float = 0.05          # significance level used by the statistical critic
+    code_mode: str = "spec"             # "spec": model designs the experiment, vetted code writes the script; "free": model writes code
+    spec_retries: int = 2               # extra tries when the experiment design is invalid
+    memory_char_budget: int = 1200      # size of the "earlier attempts" note put into prompts
+    unload_model_before_run: bool = True  # free the language model's RAM before the sandbox starts
+    figure_vlm_model: str = ""          # optional vision model for describing figures ("" = off)
 
     storage_dir: Path = PROJECT_ROOT / "storage"
     data_dir: Path = PROJECT_ROOT / "data"
@@ -134,10 +140,22 @@ def load_settings(
         raise ConfigError("CITATION_RETRIES must be between 0 and 3")
     if not 0 <= repairs <= 5:
         raise ConfigError("MAX_REPAIR_RETRIES must be between 0 and 5")
-    sandbox_timeout = _num(env, "SANDBOX_TIMEOUT_SECONDS", 30.0, float)
-    sandbox_memory = _num(env, "SANDBOX_MEMORY_MB", 256, int)
+    sandbox_timeout = _num(env, "SANDBOX_TIMEOUT_SECONDS", 60.0, float)
+    sandbox_memory = _num(env, "SANDBOX_MEMORY_MB", 512, int)
     sandbox_pids = _num(env, "SANDBOX_PIDS_LIMIT", 64, int)
     sandbox_cpus = _num(env, "SANDBOX_CPUS", 1.0, float)
+    critic_alpha = _num(env, "CRITIC_ALPHA", 0.05, float)
+    code_mode = env.get("CODE_MODE", "spec").strip().lower()
+    if code_mode not in ("spec", "free"):
+        raise ConfigError("CODE_MODE must be 'spec' or 'free'")
+    spec_retries = _num(env, "SPEC_RETRIES", 2, int)
+    if not 0 <= spec_retries <= 5:
+        raise ConfigError("SPEC_RETRIES must be between 0 and 5")
+    memory_budget = _num(env, "MEMORY_CHAR_BUDGET", 1200, int)
+    if memory_budget < 0:
+        raise ConfigError("MEMORY_CHAR_BUDGET must be >= 0")
+    if not 0 < critic_alpha < 0.5:
+        raise ConfigError("CRITIC_ALPHA must be between 0 and 0.5")
     if sandbox_timeout <= 0 or sandbox_timeout > 600:
         raise ConfigError("SANDBOX_TIMEOUT_SECONDS must be between 0 and 600")
     if sandbox_memory < 64:
@@ -158,6 +176,12 @@ def load_settings(
         sandbox_cpus=sandbox_cpus,
         sandbox_pids_limit=sandbox_pids,
         sandbox_max_output_kb=_num(env, "SANDBOX_MAX_OUTPUT_KB", 64, int),
+        critic_alpha=critic_alpha,
+        code_mode=code_mode,
+        spec_retries=spec_retries,
+        memory_char_budget=memory_budget,
+        unload_model_before_run=env.get("UNLOAD_MODEL_BEFORE_RUN", "true").strip().lower() not in ("0", "false", "no"),
+        figure_vlm_model=env.get("FIGURE_VLM_MODEL", "").strip(),
         llm_provider=provider,
         ollama_model=env.get("OLLAMA_MODEL", "llama3.2:3b"),
         ollama_base_url=env.get("OLLAMA_BASE_URL", "http://localhost:11434"),
