@@ -2,8 +2,8 @@
 
 THIS IS NOT REINFORCEMENT LEARNING. Nothing is trained and nothing is remembered between runs; the
 model simply sees the error text once and writes new code. The loop is capped by ``max_repairs`` so a
-failing script costs at most ``1 + max_repairs`` sandbox runs. See docs/rl_proposal.md for what a
-genuine RL component would require.
+failing script costs at most ``1 + max_repairs`` sandbox runs. A genuine RL component would need a
+reward signal, logged experience and an update rule; none of that exists here.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def summarize_error(result: ExecutionResult, max_chars: int = 1500) -> str:
     lines = [f"Status: {result.status} (exit code {result.exit_code})", f"Meaning: {result.message}"]
     module = missing_module(result.stderr)
     if module:
-        lines.append(f"The module '{module}' is NOT installed. Only the standard library and numpy exist.")
+        lines.append(f"The module '{module}' is NOT installed. Only the standard library, numpy, scipy, pandas and scikit-learn exist.")
     if result.status == Status.TIMEOUT:
         lines.append("Make the script much faster: fewer iterations, smaller data, no infinite loops.")
     if result.status == Status.OUT_OF_MEMORY:
@@ -94,6 +94,9 @@ def run_with_repair(
             break
         if not result.repairable:
             attempt.note = "Not retried: a code fix cannot solve a sandbox problem."
+            break
+        if not getattr(repairer, "supports_repair", True):
+            attempt.note = "Not retried: this experiment was built from a vetted template, so rewriting it cannot help."
             break
         if number > max_repairs:
             attempt.note = f"Stopped: repair limit ({max_repairs}) reached."

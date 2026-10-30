@@ -1,7 +1,8 @@
 """Hypothesis Generator Agent: propose a testable hypothesis grounded in retrieved evidence.
 
-Week 1 passes the reviewer summary plus the retrieved records. Week 2 will add a
-full RAG pipeline with stricter source-grounding on top of this agent.
+It receives the reviewer summary plus the retrieved records and must cite papers by id. If its answer
+cites no retrieved paper it is asked again (a bounded retry). Citation checks live in
+src/retrieval/rag_pipeline.py.
 """
 from __future__ import annotations
 
@@ -20,6 +21,14 @@ from src.models import RetrievedPaper
 
 logger = logging.getLogger(__name__)
 
+# Added to the prompt when experiments are built from a design form (CODE_MODE=spec).
+EXPERIMENT_SCOPE = (
+    "The experiment will be run automatically, so the TEST PLAN must describe ONE comparison between a baseline and a "
+    "treatment (two methods, or two settings of one method) on ONE of these small datasets: iris, wine, breast_cancer, "
+    "digits, measured by accuracy or macro-F1. Phrase the HYPOTHESIS as a testable claim about that comparison, "
+    "informed by the papers."
+)
+
 SYSTEM = (
     "[TASK:HYPOTHESIS]\n"
     "You are a research scientist. Using ONLY the literature summary and paper records provided "
@@ -31,7 +40,7 @@ SYSTEM = (
     "TEST PLAN: <a minimal experiment, the metric, and what result would refute the hypothesis>"
 )
 HUMAN = (
-    "Topic: {topic}\n\nLiterature summary:\n{summary}\n\n<papers>\n{papers}\n</papers>\n\n{reminder}"
+    "Topic: {topic}\n\nLiterature summary:\n{summary}\n\n<papers>\n{papers}\n</papers>\n\n{memory}\n\n{scope}\n\n{reminder}"
 )
 
 
@@ -59,19 +68,21 @@ def parse_hypothesis_text(text: str) -> tuple[str, str, str]:
 
 
 class HypothesisGeneratorAgent:
-    def __init__(self, llm: BaseChatModel, citation_retries: int = 1) -> None:
+    def __init__(self, llm: BaseChatModel, citation_retries: int = 1, scope: str = "") -> None:
         self.citation_retries = citation_retries
+        self.scope = scope                       # extra rules about what the experiment can be (spec mode)
         prompt = ChatPromptTemplate.from_messages([("system", SYSTEM), ("human", HUMAN)])
         self._chain = prompt | llm | StrOutputParser()
 
-    def run(self, topic: str, review: LiteratureReview, evidence: List[RetrievedPaper]) -> Hypothesis:
+    def run(self, topic: str, review: LiteratureReview, evidence: List[RetrievedPaper], memory_text: str = "") -> Hypothesis:
         if not evidence:
             raise ValueError("Hypothesis generation needs retrieved evidence.")
         papers = format_evidence(evidence)
 
         def invoke(reminder: str) -> str:
             return self._chain.invoke(
-                {"topic": topic, "summary": review.summary, "papers": papers, "reminder": reminder})
+                {"topic": topic, "summary": review.summary, "papers": papers, "reminder": reminder,
+                 "memory": memory_text, "scope": self.scope})
 
         try:
             raw, valid, unknown, used = generate_with_citation_retry(

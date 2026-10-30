@@ -39,6 +39,7 @@ def format_evidence(items: Sequence[RetrievedPaper], max_abstract_chars: int = 1
             f"[{p.uid}] {p.title}\n"
             f"Authors: {', '.join(p.authors[:5]) or 'n/a'} | Published: {p.published[:10] or 'n/a'} | URL: {p.url}\n"
             f"Abstract: {abstract}"
+            + (("\nFigure captions: " + " | ".join(item.captions)) if getattr(item, "captions", None) else "")
         )
     return "\n\n".join(blocks)
 

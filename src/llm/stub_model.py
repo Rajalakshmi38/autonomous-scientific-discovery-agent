@@ -7,6 +7,7 @@ tested without any model installed. Every output is labelled accordingly.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, List, Optional
 
@@ -21,15 +22,15 @@ _PAPER_LINE = re.compile(r"^\[((?:arxiv|pubmed):[^\]\s]+)\]\s+(.+)$", re.MULTILI
 _STUB_SCRIPT = '''\
 # TEST MODE placeholder script. It uses SYNTHETIC random data and proves nothing
 # about the research topic. It only exists to exercise the execution pipeline.
-import json, random, statistics
+import json, random
 
 random.seed(0)
-group_a = [random.gauss(0.0, 1.0) for _ in range(100)]
-group_b = [random.gauss(0.1, 1.0) for _ in range(100)]
+baseline = [random.gauss(0.0, 1.0) for _ in range(30)]
+treatment = [random.gauss(0.0, 1.0) for _ in range(30)]   # same distribution: no real effect
 print(json.dumps({
-    "data_type": "synthetic",
-    "mean_a": statistics.mean(group_a),
-    "mean_b": statistics.mean(group_b),
+    "data_origin": "synthetic",
+    "comparisons": [{"name": "treatment vs baseline (synthetic)", "labels": ["baseline", "treatment"],
+                     "a": baseline, "b": treatment}],
 }))
 '''
 
@@ -72,6 +73,14 @@ class RuleBasedStubChatModel(BaseChatModel):
                 f"RATIONALE: Placeholder; evidence papers listed: {cites}.\n"
                 "TEST PLAN: Generate synthetic data, compare two simple estimators, report the metric difference."
             )
+        if "[TASK:EXPERIMENT_SPEC]" in prompt:
+            return json.dumps({
+                "note": TEST_MODE_LABEL,
+                "dataset": "iris",
+                "baseline": {"model": "logistic_regression", "params": {"C": 1}, "scale": False},
+                "treatment": {"model": "logistic_regression", "params": {"C": 10}, "scale": False},
+                "metric": "accuracy", "n_resamples": 20,
+            })
         if "[TASK:EXPERIMENT_CODE]" in prompt or "[TASK:EXPERIMENT_REPAIR]" in prompt:
             return f"```python\n{_STUB_SCRIPT}```"
         return f"{TEST_MODE_LABEL} Unrecognised task."
