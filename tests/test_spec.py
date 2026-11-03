@@ -15,7 +15,7 @@ from src.agents.code_executor import CodeExecutorAgent
 from src.agents.hypothesis_generator import Hypothesis
 from src.critic.critic import StatisticalCritic, Verdict
 from src.experiments.spec import (
-    DATASETS, MODEL_OPTIONS, SpecError, default_spec, normalise_raw, options_text, parse_spec_text, render_script,
+    DATASETS, MODEL_OPTIONS, SpecError, confounding_factors, default_spec, normalise_raw, options_text, parse_spec_text, render_script,
     spec_from_text, validate_spec, validate_spec_tolerant,
 )
 from src.llm.stub_model import RuleBasedStubChatModel
@@ -169,11 +169,11 @@ def test_agent_falls_back_to_a_labelled_default_when_nothing_in_the_hypothesis_h
 
 def test_small_slips_in_the_models_design_are_repaired_and_reported():
     sloppy = json.dumps({"dataset": "Wine", "metric": "F1", "n_resamples": 100,
-                         "baseline": {"model": "Random Forest", "params": {"trees": 7, "random_state": 1}},
+                         "baseline": {"model": "Random Forest", "params": {"trees": 7, "random_state": 1}, "scale": "yes"},
                          "treatment": {"model": "k-Nearest Neighbors", "params": {"k": 7}, "scale": "true"}})
     plan = CodeExecutorAgent(FakeListChatModel(responses=[sloppy]), mode="spec").prepare_experiment(HYP)
     assert plan.source == "model_spec"
-    assert plan.design_summary == "wine: knn(n_neighbors=5) + scaling vs random_forest(n_estimators=5), f1_macro, 30 resamples"
+    assert plan.design_summary == "wine: knn(n_neighbors=5) + scaling vs random_forest(n_estimators=5) + scaling, f1_macro, 30 resamples"
     assert "adjusted to allowed options" in plan.note and "n_neighbors 7 -> 5" in plan.note
 
 
@@ -272,3 +272,52 @@ def test_keyword_designs_are_always_valid_and_renderable():
     for text in ("Scaling helps naive bayes", "decision tree depth", "svm vs knn", "logistic regression regularisation"):
         spec, _ = spec_from_text(text)
         compile(render_script(validate_spec(spec.to_dict())), "r", "exec")
+
+
+# ------------------------------------------------------------------ a fair experiment changes exactly ONE thing
+def two(base, treat):
+    return {"dataset": "iris", "baseline": base, "treatment": treat}
+
+
+@pytest.mark.parametrize("base,treat,factors", [
+    ({"model": "knn"}, {"model": "knn", "scale": True}, ["feature scaling"]),
+    ({"model": "knn", "params": {"n_neighbors": 3}}, {"model": "knn", "params": {"n_neighbors": 11}}, ["the parameter n_neighbors"]),
+    ({"model": "svm"}, {"model": "random_forest"}, ["the model"]),
+    ({"model": "random_forest", "params": {"n_estimators": 50}}, {"model": "logistic_regression", "params": {"C": 1}, "scale": True},
+     ["the model", "feature scaling"]),                                       # the design from a real 3B-model run
+    ({"model": "random_forest", "params": {"n_estimators": 10, "max_depth": 2}}, {"model": "random_forest", "params": {"n_estimators": 100, "max_depth": 5}},
+     ["the parameter max_depth", "the parameter n_estimators"]),
+])
+def test_the_factors_that_differ_are_counted(base, treat, factors):
+    assert confounding_factors(validate_spec(two(base, treat))) == factors
+
+
+def test_designs_that_change_several_things_are_rejected_with_advice():
+    with pytest.raises(SpecError, match="the model and feature scaling.*exactly ONE thing"):
+        validate_spec_tolerant(two({"model": "random_forest"}, {"model": "logistic_regression", "scale": True}))
+    with pytest.raises(SpecError, match="exactly ONE thing"):
+        validate_spec_tolerant(two({"model": "random_forest", "params": {"n_estimators": 10, "max_depth": 2}},
+                                   {"model": "random_forest", "params": {"n_estimators": 100, "max_depth": 5}}))
+    validate_spec_tolerant(two({"model": "random_forest"}, {"model": "logistic_regression", "scale": True}), single_factor=False)
+
+
+def test_the_model_is_asked_again_when_its_design_changes_two_things():
+    confounded = json.dumps(two({"model": "random_forest"}, {"model": "logistic_regression", "scale": True}))
+    fixed = json.dumps(two({"model": "knn"}, {"model": "knn", "scale": True}))
+    plan = CodeExecutorAgent(FakeListChatModel(responses=[confounded, fixed]), mode="spec", spec_retries=1).prepare_experiment(HYP)
+    assert plan.source == "model_spec" and plan.design_summary == "iris: knn + scaling vs knn, accuracy, 20 resamples"
+
+
+def test_keyword_rules_take_over_when_the_model_keeps_confounding():
+    confounded = json.dumps(two({"model": "random_forest"}, {"model": "logistic_regression", "scale": True}))
+    plan = CodeExecutorAgent(FakeListChatModel(responses=[confounded]), mode="spec", spec_retries=1).prepare_experiment(HYP)
+    assert plan.source == "keyword_spec" and len(confounding_factors(validate_spec(plan.spec))) == 1
+
+
+def test_every_fallback_design_changes_exactly_one_thing():
+    from src.experiments.spec import _ONE_MODEL_SETTINGS
+    for text in ("Scaling helps naive bayes", "svm vs knn", "random forest", "decision tree depth", "logistic regression", "k-NN"):
+        spec, _ = spec_from_text(text)
+        assert len(confounding_factors(spec)) == 1, text
+    assert len(confounding_factors(default_spec())) == 1
+    assert set(_ONE_MODEL_SETTINGS) >= {"random_forest", "knn", "svm"}

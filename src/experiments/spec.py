@@ -266,10 +266,32 @@ def normalise_raw(raw: Any) -> Tuple[Any, List[str]]:
     return out, notes
 
 
-def validate_spec_tolerant(raw: Any) -> Tuple["ExperimentSpec", List[str]]:
-    """Like validate_spec, but first maps small slips onto allowed options. Returns (spec, notes about changes)."""
+def confounding_factors(spec: "ExperimentSpec") -> List[str]:
+    """What differs between baseline and treatment. A fair experiment changes exactly ONE thing."""
+    a, b = spec.baseline, spec.treatment
+    differing: List[str] = []
+    if a.model != b.model:
+        differing.append("the model")                    # different models have different parameters by nature
+    else:
+        differing += [f"the parameter {k}" for k in sorted(set(a.params) | set(b.params)) if a.params.get(k) != b.params.get(k)]
+    if a.scale != b.scale:
+        differing.append("feature scaling")
+    return differing
+
+
+def validate_spec_tolerant(raw: Any, single_factor: bool = True) -> Tuple["ExperimentSpec", List[str]]:
+    """Like validate_spec, but first maps small slips onto allowed options. Returns (spec, notes about changes).
+
+    With single_factor=True (the default) a design that changes more than one thing at once is rejected,
+    because any difference could then be caused by either change.
+    """
     cleaned, notes = normalise_raw(raw)
-    return validate_spec(cleaned), notes
+    spec = validate_spec(cleaned)
+    factors = confounding_factors(spec)
+    if single_factor and len(factors) != 1:
+        raise SpecError("The baseline and treatment differ in " + (" and ".join(factors) or "nothing") +
+                        ". Change exactly ONE thing: the model, OR one parameter of the same model, OR feature scaling.")
+    return spec, notes
 
 
 # --------------------------------------------------------------------------- rule-based design from the hypothesis text
@@ -372,7 +394,7 @@ print(json.dumps({
     "data_origin": "benchmark",
     "design": SPEC,
     "comparisons": [{
-        "name": LABELS[1] + " vs " + LABELS[0] + " on " + SPEC["dataset"] + " (" + SPEC["metric"] + ")",
+        "name": SPEC["dataset"] + " (" + SPEC["metric"] + ")",
         "labels": LABELS, "a": a, "b": b, "paired": True,
         "resampling": {"n_train": len(y) - n_test, "n_test": n_test},
     }],
