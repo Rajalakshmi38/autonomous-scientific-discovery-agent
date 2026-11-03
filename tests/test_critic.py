@@ -250,3 +250,12 @@ def test_resampled_scores_with_no_real_difference_are_inconclusive():
 def test_bad_resampling_information_is_rejected(resampling, paired):
     r = StatisticalCritic().evaluate(resampled_payload(A_SCORES, B_SCORES, resampling=resampling, paired=paired))
     assert r.verdict == Verdict.NOT_EVALUABLE and "COMPARISON_NOT_ANALYSABLE" in codes(r)
+
+
+def test_long_labels_and_names_are_not_cut_off():
+    label_a, label_b = "random_forest(max_depth=None, n_estimators=50)", "logistic_regression(C=1) + scaling"
+    stdout = json.dumps({"data_origin": "benchmark", "comparisons": [{
+        "name": "iris (accuracy)", "labels": [label_a, label_b], "a": A_SCORES, "b": B_SCORES, "paired": True,
+        "resampling": {"n_train": 105, "n_test": 45}}]})
+    line = StatisticalCritic().evaluate(stdout).summary_lines[0]
+    assert label_a in line and label_b in line and line.startswith("iris (accuracy):")

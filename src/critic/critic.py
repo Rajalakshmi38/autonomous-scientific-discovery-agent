@@ -167,10 +167,10 @@ class StatisticalCritic:
 
     def _analyse(self, comps: List[Any], report: CriticReport) -> None:
         for index, item in enumerate(comps, start=1):
-            name = str(item.get("name", f"comparison {index}"))[:80] if isinstance(item, dict) else f"comparison {index}"
+            name = str(item.get("name", f"comparison {index}"))[:120] if isinstance(item, dict) else f"comparison {index}"
             labels = ["a", "b"]
             if isinstance(item, dict) and isinstance(item.get("labels"), list) and len(item["labels"]) == 2:
-                labels = [str(x)[:40] for x in item["labels"]]
+                labels = [str(x)[:100] for x in item["labels"]]
             cr = ComparisonReport(name, labels)
             report.comparisons.append(cr)
             if not isinstance(item, dict):
