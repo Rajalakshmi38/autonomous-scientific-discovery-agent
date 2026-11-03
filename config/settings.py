@@ -50,7 +50,7 @@ class Settings:
     max_repair_retries: int = 2         # code-repair retries after a failed run (total runs = 1 + this)
     docker_command: str = "docker"
     sandbox_image: str = "asda-sandbox:latest"
-    sandbox_timeout_seconds: float = 60.0
+    sandbox_timeout_seconds: float = 120.0
     sandbox_memory_mb: int = 512
     sandbox_cpus: float = 1.0
     sandbox_pids_limit: int = 64
@@ -140,7 +140,7 @@ def load_settings(
         raise ConfigError("CITATION_RETRIES must be between 0 and 3")
     if not 0 <= repairs <= 5:
         raise ConfigError("MAX_REPAIR_RETRIES must be between 0 and 5")
-    sandbox_timeout = _num(env, "SANDBOX_TIMEOUT_SECONDS", 60.0, float)
+    sandbox_timeout = _num(env, "SANDBOX_TIMEOUT_SECONDS", 120.0, float)
     sandbox_memory = _num(env, "SANDBOX_MEMORY_MB", 512, int)
     sandbox_pids = _num(env, "SANDBOX_PIDS_LIMIT", 64, int)
     sandbox_cpus = _num(env, "SANDBOX_CPUS", 1.0, float)
