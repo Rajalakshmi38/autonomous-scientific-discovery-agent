@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 # Added to the prompt when experiments are built from a design form (CODE_MODE=spec).
 EXPERIMENT_SCOPE = (
     "The experiment will be run automatically, so the TEST PLAN must describe ONE comparison between a baseline and a "
-    "treatment (two methods, or two settings of one method) on ONE of these small datasets: iris, wine, breast_cancer, "
+    "treatment that differ in exactly ONE thing (the method, OR one setting of the same method, OR feature scaling) on "
+    "ONE of these small datasets: iris, wine, breast_cancer, "
     "digits, measured by accuracy or macro-F1. Phrase the HYPOTHESIS as a testable claim about that comparison, "
     "informed by the papers."
 )
