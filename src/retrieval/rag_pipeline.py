@@ -12,9 +12,11 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
 from src.agents.base import extract_citations, format_evidence
+from src.ingestion.figures import load_manifest, paper_dir
 from src.models import RetrievedPaper
 from src.retrieval.retriever import PaperRetriever
 
@@ -62,7 +64,9 @@ def _words(text: str) -> set:
 
 
 class RagPipeline:
-    def __init__(self, retriever: PaperRetriever, char_budget: int = 6000, max_abstract_chars: int = 1200) -> None:
+    def __init__(self, retriever: PaperRetriever, char_budget: int = 6000, max_abstract_chars: int = 1200,
+                 figures_dir: Optional[Path] = None) -> None:
+        self.figures_dir = Path(figures_dir) if figures_dir else None
         self.retriever = retriever
         self.char_budget = char_budget
         self.max_abstract_chars = max_abstract_chars
@@ -70,6 +74,10 @@ class RagPipeline:
     def prepare(self, topic: str, k: int = 5) -> RagContext:
         """Retrieve up to ``k`` papers, then keep the best-ranked ones that fit the character budget."""
         retrieved = self.retriever.retrieve(topic, k=k)
+        if self.figures_dir is not None:                    # captions of figures extracted earlier (`figures` command)
+            for item in retrieved:
+                figs = load_manifest(paper_dir(self.figures_dir, item.paper.uid))
+                item.captions = [f"{fg.label} (page {fg.page}): {fg.caption[:200]}" for fg in figs[:3]]
         kept: List[RetrievedPaper] = []
         used = 0
         for item in retrieved:
