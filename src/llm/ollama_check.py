@@ -19,6 +19,16 @@ class OllamaStatus:
         return self.reachable and self.model_available is not False
 
 
+def unload_model(base_url: str, model: str, timeout: float = 15.0, session: Optional[requests.Session] = None) -> bool:
+    """Ask Ollama to drop the model from memory now (keep_alive = 0). Returns True if Ollama accepted."""
+    http = session or requests
+    try:
+        resp = http.post(f"{base_url.rstrip('/')}/api/generate", json={"model": model, "keep_alive": 0}, timeout=timeout)
+    except requests.RequestException:
+        return False
+    return resp.status_code == 200
+
+
 def _normalise(name: str) -> str:
     return name if ":" in name else f"{name}:latest"
 
