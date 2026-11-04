@@ -87,7 +87,7 @@ def test_settings_for_sandbox_are_validated():
     with pytest.raises(ConfigError):
         load_settings(env={"SANDBOX_MEMORY_MB": "10"}, load_env_file=False)
     cfg = SandboxConfig.from_settings(load_settings(env={"DOCKER_COMMAND": "wsl docker"}, load_env_file=False))
-    assert cfg.docker_command == ("wsl", "docker") and cfg.memory_mb == 256
+    assert cfg.docker_command == ("wsl", "docker") and cfg.memory_mb == 512
 
 
 # =========================================================== 2. fake-docker tests (real subprocess handling)
@@ -303,7 +303,9 @@ def test_full_pipeline_with_execution_test_mode(workflow_parts, tmp_path):
     result = make_workflow(workflow_parts, fake_sandbox()).run("graph neural networks")
     assert result.status == "COMPLETED" and result.execution_status == Status.SUCCESS
     stdout = result.execution.final_result.stdout
-    assert json.loads(stdout)["data_type"] == "synthetic"          # the mock script labels its data synthetic
+    assert json.loads(stdout)["data_origin"] == "synthetic"         # the mock script labels its data synthetic
+    assert result.critic.verdict == "INCONCLUSIVE"                  # same distribution on both sides: no effect by design
+    assert result.critic.data_origin == "synthetic"
     saved = json.loads(result.save(tmp_path / "runs").read_text(encoding="utf-8"))
     assert saved["execution"]["attempt_count"] == 1 and saved["llm_mode"] == "TEST MODE"
     assert saved["sources_cited_by_hypothesis"][0]["id"] == "arxiv:1"           # traceable id ...
@@ -315,12 +317,14 @@ def test_pipeline_reports_unavailable_sandbox_and_never_runs_on_host(workflow_pa
     result = make_workflow(workflow_parts, fake_sandbox()).run("graph neural networks")
     assert result.status == "COMPLETED" and result.execution_status == Status.SANDBOX_UNAVAILABLE
     assert result.execution.attempts == []
+    assert result.critic is None
     assert any("NOT executed" in w for w in result.warnings)
 
 
 def test_pipeline_without_sandbox_does_not_execute(workflow_parts):
     result = make_workflow(workflow_parts, None).run("graph neural networks")
     assert result.execution is None and result.execution_status == Status.NOT_RUN
+    assert result.critic is None
     assert any("not executed" in w for w in result.warnings)
 
 
@@ -333,6 +337,7 @@ def test_pipeline_surfaces_failed_execution_honestly(workflow_parts):
     result = wf.run("graph neural networks")
     assert result.execution_status == Status.FAILED          # the identical 'fix' is detected and not retried
     assert any("ended with FAILED" in w for w in result.warnings)
+    assert result.critic.verdict == "NO_RESULT"              # nothing ran successfully, so nothing to check
 
 
 # =========================================================== 5. REAL Docker tests (skipped without Docker + image)
@@ -369,6 +374,15 @@ def test_real_docker_success_failure_and_missing_dependency(real_sandbox):
 
 
 @pytest.mark.docker
+def test_real_docker_has_the_scientific_libraries_and_offline_datasets(real_sandbox):
+    code = ("import numpy, scipy, pandas, sklearn\n"
+            "from sklearn.datasets import load_iris\n"
+            "print(load_iris().data.shape)\n")
+    r = real_sandbox.run_code(code)
+    assert r.status == Status.SUCCESS and r.stdout.strip() == "(150, 4)", r.stderr
+
+
+@pytest.mark.docker
 def test_real_docker_timeout(real_sandbox):
     r = real_sandbox.run_code("while True:\n    pass", timeout_seconds=4)
     assert r.status == Status.TIMEOUT and real_sandbox.leftover_containers() == []
@@ -384,3 +398,65 @@ def test_real_docker_repair_loop_end_to_end(real_sandbox):
     plan = agent.prepare_experiment(HYP)
     out = run_with_repair(real_sandbox, agent, HYP, plan.code, max_repairs=2)
     assert out.final_status == Status.SUCCESS and len(out.attempts) == 2
+
+
+# =========================================================== 6. spec mode (Week 3): vetted templates, memory, unload hook
+from src.memory.store import MemoryStore
+
+
+def test_loop_does_not_rewrite_vetted_template_experiments():
+    agent = CodeExecutorAgent(RuleBasedStubChatModel(), mode="spec")
+    out = run_with_repair(ScriptedSandbox([FAIL]), agent, HYP, "rendered code", max_repairs=3)
+    assert len(out.attempts) == 1 and "vetted template" in out.attempts[0].note
+
+
+def spec_workflow(parts, tmp_path, executor=None, hook=None):
+    retriever, llm = parts
+    return ResearchWorkflow(
+        retriever, LiteratureReviewerAgent(llm), HypothesisGeneratorAgent(llm, scope="SCOPE"),
+        executor or CodeExecutorAgent(llm, mode="spec"), llm_mode="TEST MODE", top_k=3,
+        sandbox=fake_sandbox(timeout_seconds=120, max_output_bytes=60000), max_repairs=1,
+        memory=MemoryStore(tmp_path / "mem.jsonl"), before_execute=hook)
+
+
+def test_spec_mode_pipeline_runs_a_real_experiment_and_remembers_it(workflow_parts, tmp_path):
+    pytest.importorskip("sklearn")
+    calls = []
+    wf = spec_workflow(workflow_parts, tmp_path, hook=lambda: calls.append("unloaded"))
+    result = wf.run("graph neural networks")
+    assert result.status == "COMPLETED" and result.execution_status == Status.SUCCESS
+    assert result.experiment.source == "model_spec" and result.experiment.design_summary.startswith("iris:")
+    assert result.critic.verdict in ("SIGNIFICANT", "INCONCLUSIVE") and result.critic.data_origin == "benchmark"
+    assert calls == ["unloaded"]                                        # the model was unloaded before the sandbox started
+    assert set(result.step_seconds) == {"retrieve", "review", "hypothesis", "experiment_design", "execute", "critic"}
+    saved = wf.memory.entries()
+    assert len(saved) == 1 and saved[0]["design"] == result.experiment.design_summary
+    wf.run("graph neural networks")                                     # the second run is shown the first
+    assert "Previous attempts" in wf.memory.render("graph neural networks", include_mock=True)
+    assert len(wf.memory.entries()) == 2
+
+
+def test_a_failing_unload_hook_does_not_stop_the_run(workflow_parts, tmp_path):
+    pytest.importorskip("sklearn")
+    def boom():
+        raise RuntimeError("cannot unload")
+    result = spec_workflow(workflow_parts, tmp_path, hook=boom).run("graph neural networks")
+    assert result.execution_status == Status.SUCCESS
+
+
+def test_invalid_designs_fall_back_to_a_labelled_default(workflow_parts, tmp_path):
+    pytest.importorskip("sklearn")
+    executor = CodeExecutorAgent(FakeListChatModel(responses=["no json here"]), mode="spec", spec_retries=0)
+    result = spec_workflow(workflow_parts, tmp_path, executor=executor).run("graph neural networks")
+    assert result.experiment.source == "default_spec"
+    assert any("does NOT test the hypothesis" in w for w in result.warnings)
+    assert result.execution_status == Status.SUCCESS
+
+
+def test_settings_for_experiment_mode_are_validated():
+    s = load_settings(env={}, load_env_file=False)
+    assert (s.code_mode, s.spec_retries, s.memory_char_budget, s.unload_model_before_run, s.figure_vlm_model) == ("spec", 2, 1200, True, "")
+    assert load_settings(env={"UNLOAD_MODEL_BEFORE_RUN": "false"}, load_env_file=False).unload_model_before_run is False
+    for bad in ({"CODE_MODE": "magic"}, {"SPEC_RETRIES": "9"}, {"MEMORY_CHAR_BUDGET": "-1"}):
+        with pytest.raises(ConfigError):
+            load_settings(env=bad, load_env_file=False)

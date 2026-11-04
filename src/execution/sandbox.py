@@ -47,7 +47,7 @@ class Status:
 class SandboxConfig:
     image: str = "asda-sandbox:latest"
     timeout_seconds: float = 30.0
-    memory_mb: int = 256
+    memory_mb: int = 512
     cpus: float = 1.0
     pids_limit: int = 64
     max_output_bytes: int = 64 * 1024
@@ -320,7 +320,7 @@ class DockerSandbox:
         module = missing_module(stderr)
         message = {
             "missing_dependency": f"The script needs a library that is not installed in the sandbox"
-                                  f"{f' ({module})' if module else ''}. Only the standard library and numpy are available.",
+                                  f"{f' ({module})' if module else ''}. Only the standard library, numpy, scipy, pandas and scikit-learn are available.",
             "syntax_error": "The script has a Python syntax error.",
             "runtime_error": "The script raised an error while running.",
         }.get(kind, f"The script exited with code {code}.")
