@@ -48,3 +48,4 @@ class Paper:
 class RetrievedPaper:
     paper: Paper
     score: float
+    captions: List[str] = field(default_factory=list)   # figure captions, when the paper's figures were extracted
