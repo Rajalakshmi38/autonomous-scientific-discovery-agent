@@ -16,23 +16,27 @@ import argparse
 import dataclasses
 import logging
 import sys
+from pathlib import Path
 from typing import Optional, Sequence
 
 from config.settings import PROJECT_ROOT, ConfigError, Settings, load_settings
 from src.agents.code_executor import CodeExecutorAgent
-from src.agents.hypothesis_generator import HypothesisGeneratorAgent
+from src.agents.hypothesis_generator import EXPERIMENT_SCOPE, HypothesisGeneratorAgent
 from src.agents.literature_reviewer import LiteratureReviewerAgent
 from src.execution.sandbox import DockerSandbox, SandboxConfig, Status
 from src.execution.self_test import run_self_test
 from src.ingestion.arxiv_client import ArxivClient
 from src.ingestion.base import IngestionError
+from src.ingestion.figures import FigureError, describe_figure, download_pdf, extract_figures, paper_dir, save_manifest
 from src.ingestion.paper_store import PaperStore
 from src.llm.factory import available_providers, describe_llm, get_llm, get_provider_spec
-from src.llm.ollama_check import check_ollama
+from src.llm.ollama_check import check_ollama, unload_model
+from src.memory.store import MemoryStore
 from src.retrieval.embeddings import EmbeddingError, get_embedder
 from src.retrieval.retriever import PaperRetriever
 from src.retrieval.vector_store import NumpyVectorStore, VectorStoreError
 from src.utils.logging_config import setup_logging
+from src.utils.run_summary import format_summary, load_runs, summarize
 from src.utils.system_info import get_system_info, recommend
 from src.workflow import ResearchWorkflow
 
@@ -92,6 +96,66 @@ def cmd_sandbox_test(settings: Settings, _args) -> int:
         return 1
     print("\nAll probes passed. The restrictions above work on this machine.")
     print("This is evidence, not a guarantee: keep running only code you accept the risk of running in a container.")
+    return 0
+
+
+def cmd_figures(settings: Settings, args) -> int:
+    store = PaperStore(settings.papers_db_path)
+    try:
+        paper = store.get(args.paper)
+    finally:
+        store.close()
+    if paper is None:
+        print(f"Paper {args.paper!r} is not stored. Use an id shown by 'search', for example arxiv:2610.21958")
+        return 1
+    if not paper.pdf_url:
+        print("This paper has no PDF link.")
+        return 1
+    folder = paper_dir(settings.data_dir / "figures", paper.uid)
+    print(f"Downloading the PDF of {paper.uid} ...")
+    pdf = download_pdf(paper.pdf_url, folder / "paper.pdf", timeout=settings.arxiv_timeout_seconds * 2)
+    figures = extract_figures(pdf, folder)
+    if not figures:
+        print("No figure captions were found in this PDF (captions must start a line, like 'Figure 1: ...').")
+        return 0
+    if args.describe:
+        if not settings.figure_vlm_model:
+            print("--describe needs a vision model: set FIGURE_VLM_MODEL in .env (for example one pulled with Ollama).")
+        else:
+            for fig in figures[:3]:                                  # a few calls only: vision models are slow
+                try:
+                    fig.description = describe_figure(Path(fig.image_path), fig.caption, settings.ollama_base_url, settings.figure_vlm_model)
+                    fig.description_source = f"{settings.figure_vlm_model} (unverified model output)"
+                except FigureError as exc:
+                    print(f"  could not describe {fig.label}: {exc}")
+            save_manifest(folder, figures)
+    for fig in figures:
+        print(f"{fig.label} (page {fig.page}): {fig.caption}\n    image: {fig.image_path}")
+        if fig.description:
+            print(f"    description [{fig.description_source}]: {fig.description}")
+    print("\nThese captions are now added to the evidence for this paper in later 'run' commands.")
+    return 0
+
+
+def cmd_memory(settings: Settings, _args) -> int:
+    entries = MemoryStore(settings.storage_dir / "memory.jsonl").entries()
+    if not entries:
+        print("Memory is empty. Each finished run adds one entry.")
+        return 0
+    for e in entries[-10:]:
+        print(f"{e.get('when')}  [{e.get('execution_status')} / {e.get('critic_verdict')}]  {e.get('topic')}\n    {e.get('design')}")
+    print(f"\n{len(entries)} entr(y/ies) in {settings.storage_dir / 'memory.jsonl'}. Delete that file to clear the memory.")
+    return 0
+
+
+def cmd_summary(settings: Settings, _args) -> int:
+    records, unreadable = load_runs(settings.runs_dir)
+    if not records:
+        print("No run records yet. Run: python -m src.main run --topic \"...\"")
+        return 0
+    print(f"Run records in {settings.runs_dir}: {len(records)}\n")
+    for line in format_summary(summarize(records), unreadable):
+        print(line)
     return 0
 
 
@@ -189,22 +253,30 @@ def cmd_run(settings: Settings, args) -> int:
     if settings.is_test_mode:
         print("=" * 72)
         print("TEST MODE: the LLM is a rule-based mock. Output below is NOT genuine reasoning.")
-        print("For real (free, local) model output: install Ollama, then see docs/setup_guide.md.")
+        print("For real (free, local) model output: install Ollama and see the README.")
         print("=" * 72)
     store, retriever = build_retriever(settings)
     try:
         llm = get_llm(settings)
         sandbox = None if args.no_execute else make_sandbox(settings)
+        use_memory = not args.no_memory and settings.memory_char_budget > 0
+        free_ram = spec.needs_local_server and settings.unload_model_before_run
         workflow = ResearchWorkflow(
             retriever=retriever,
             reviewer=LiteratureReviewerAgent(llm, settings.citation_retries),
-            hypothesis_agent=HypothesisGeneratorAgent(llm, settings.citation_retries),
-            executor=CodeExecutorAgent(llm),
+            hypothesis_agent=HypothesisGeneratorAgent(
+                llm, settings.citation_retries, scope=EXPERIMENT_SCOPE if settings.code_mode == "spec" else ""),
+            executor=CodeExecutorAgent(llm, mode=settings.code_mode, spec_retries=settings.spec_retries),
+            memory=MemoryStore(settings.storage_dir / "memory.jsonl") if use_memory else None,
+            memory_budget=settings.memory_char_budget,
+            figures_dir=settings.data_dir / "figures",
+            before_execute=(lambda: unload_model(settings.ollama_base_url, settings.ollama_model)) if free_ram else None,
             llm_mode=describe_llm(settings),
             top_k=args.k,
             sandbox=sandbox,
             max_repairs=settings.max_repair_retries,
             char_budget=settings.context_char_budget,
+            critic_alpha=settings.critic_alpha,
         )
         result = workflow.run(args.topic)
     finally:
@@ -227,7 +299,15 @@ def cmd_run(settings: Settings, args) -> int:
                 print(f"[{src.id}] {src.title[:80]}\n    {src.url}")
         else:
             print("(none: the hypothesis is not traceable to the retrieved papers)")
-        print(f"\n--- Experiment code (first version) ---\n{result.experiment.code}")
+        exp = result.experiment
+        label = {"model_spec": "designed by the model, script written by vetted code",
+                 "keyword_spec": "chosen by fixed keyword rules because the model's design was invalid",
+                 "default_spec": "GENERIC DEFAULT (the model's design was invalid)",
+                 "free_form": "written by the model"}.get(exp.source, exp.source)
+        print(f"\n--- Experiment ({label}) ---")
+        if exp.design_summary:
+            print(f"Design: {exp.design_summary}")
+        print(f"\n--- Experiment code (first version) ---\n{exp.code}")
         if result.execution and result.execution.attempts:
             print("\n--- Sandbox execution ---")
             for a in result.execution.attempts:
@@ -241,8 +321,20 @@ def cmd_run(settings: Settings, args) -> int:
             if last.stderr.strip() and not last.ok:
                 print(f"\nError output of the last run:\n{last.stderr.strip()[-1500:]}")
             if last.ok:
-                print("\nNote: these numbers come from model-written code. They are real outputs of that code, "
-                      "not verified research findings.")
+                if result.experiment.source == "free_form":
+                    print("\nNote: these numbers come from model-written code. They are real outputs of that code, "
+                          "not verified research findings.")
+                else:
+                    print("\nNote: the model chose the settings and a vetted template ran the experiment. These are real "
+                          "results on a small benchmark dataset, not verified research findings.")
+        if result.critic:
+            c = result.critic
+            print(f"\n--- Critic (statistics; {c.method}) ---")
+            print(f"Verdict: {c.verdict}   (data origin: {c.data_origin}; alpha = {c.alpha})")
+            for line in c.summary_lines:
+                print(f"  {line}")
+            for f in c.findings:
+                print(f"  [{f.severity}] {f.message}")
     print(f"\nSaved run record: {path}")
     return 0
 
@@ -264,12 +356,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-k", type=int, default=5)
     p.set_defaults(func=cmd_search)
 
-    p = sub.add_parser("run", help="run the Week 1 multi-agent workflow")
+    p = sub.add_parser("run", help="run the multi-agent workflow")
     p.add_argument("--topic", required=True)
     p.add_argument("-k", type=int, default=5, help="papers to retrieve (use 3 with small local models)")
     p.add_argument("--provider", choices=available_providers(), default=None,
                    help="override LLM_PROVIDER for this run")
     p.add_argument("--no-execute", action="store_true", help="prepare the code but do not run it in the sandbox")
+    p.add_argument("--no-memory", action="store_true", help="do not show earlier attempts to the model or save this run to memory")
     p.set_defaults(func=cmd_run)
 
     sub.add_parser("check-system", help="report RAM/GPU and what size of local LLM is realistic").set_defaults(func=cmd_check_system)
@@ -277,6 +370,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sandbox-build", help="build the Docker sandbox image (once)").set_defaults(func=cmd_sandbox_build)
     sub.add_parser("sandbox-status", help="is Docker running and the image built?").set_defaults(func=cmd_sandbox_status)
     sub.add_parser("sandbox-test", help="verify the sandbox restrictions on real Docker").set_defaults(func=cmd_sandbox_test)
+    p = sub.add_parser("figures", help="extract figure captions and page images from a stored paper's PDF")
+    p.add_argument("--paper", required=True, help="paper id, for example arxiv:2610.21958")
+    p.add_argument("--describe", action="store_true", help="also ask the optional vision model to describe up to 3 figures")
+    p.set_defaults(func=cmd_figures)
+    sub.add_parser("memory", help="show what earlier runs the system remembers").set_defaults(func=cmd_memory)
+    sub.add_parser("summary", help="count the saved runs: results, citations, critic verdicts").set_defaults(func=cmd_summary)
     sub.add_parser("reindex", help="rebuild the vector index from stored papers").set_defaults(func=cmd_reindex)
     return parser
 
@@ -293,7 +392,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except (ConfigError, ValueError) as exc:
         print(f"Configuration/input error: {exc}", file=sys.stderr)
         return 2
-    except (IngestionError, VectorStoreError, EmbeddingError) as exc:
+    except (IngestionError, VectorStoreError, EmbeddingError, FigureError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # last resort: readable message, details in the log file

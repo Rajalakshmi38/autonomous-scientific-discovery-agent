@@ -12,13 +12,14 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from langchain_core.runnables import RunnableLambda
 
 from src.agents.code_executor import CodeExecutorAgent, ExperimentPlan
 from src.agents.hypothesis_generator import Hypothesis, HypothesisGeneratorAgent
 from src.agents.literature_reviewer import LiteratureReview, LiteratureReviewerAgent
+from src.critic.critic import CriticReport, StatisticalCritic
 from src.execution.feedback_loop import ExecutionOutcome, run_with_repair
 from src.execution.sandbox import Status
 from src.models import RetrievedPaper
@@ -40,6 +41,8 @@ class WorkflowResult:
     review_grounding: Optional[GroundingReport] = None
     hypothesis_grounding: Optional[GroundingReport] = None
     execution: Optional[ExecutionOutcome] = None
+    critic: Optional[CriticReport] = None
+    step_seconds: Dict[str, float] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S"))
 
@@ -72,6 +75,8 @@ class WorkflowResult:
             "hypothesis_grounding": obj(self.hypothesis_grounding),
             "experiment": obj(self.experiment),
             "execution": self.execution.to_dict() if self.execution else None,
+            "critic": self.critic.to_dict() if self.critic else None,
+            "step_seconds": self.step_seconds,
             "warnings": self.warnings,
         }
 
@@ -98,18 +103,37 @@ class ResearchWorkflow:
         sandbox: Any = None,            # a DockerSandbox; None disables execution
         max_repairs: int = 2,
         char_budget: int = 6000,
+        critic_alpha: float = 0.05,
+        memory: Any = None,                                   # a MemoryStore; None = no memory
+        memory_budget: int = 1200,
+        before_execute: Optional[Callable[[], None]] = None,  # e.g. unload the language model to free RAM
+        figures_dir: Any = None,                              # folder of extracted figure captions
     ) -> None:
-        self.rag = RagPipeline(retriever, char_budget=char_budget)
+        self.rag = RagPipeline(retriever, char_budget=char_budget, figures_dir=figures_dir)
         self.reviewer, self.hypothesis_agent, self.executor = reviewer, hypothesis_agent, executor
         self.llm_mode, self.top_k = llm_mode, top_k
         self.sandbox, self.max_repairs = sandbox, max_repairs
+        self.critic = StatisticalCritic(critic_alpha)
+        self.memory, self.memory_budget, self.before_execute = memory, memory_budget, before_execute
         self._pipeline = (
-            RunnableLambda(self._step_retrieve)
-            | RunnableLambda(self._step_review)
-            | RunnableLambda(self._step_hypothesis)
-            | RunnableLambda(self._step_experiment)
-            | RunnableLambda(self._step_execute)
+            RunnableLambda(self._timed("retrieve", self._step_retrieve))
+            | RunnableLambda(self._timed("review", self._step_review))
+            | RunnableLambda(self._timed("hypothesis", self._step_hypothesis))
+            | RunnableLambda(self._timed("experiment_design", self._step_experiment))
+            | RunnableLambda(self._timed("execute", self._step_execute))
+            | RunnableLambda(self._timed("critic", self._step_critic))
         )
+
+    @staticmethod
+    def _timed(name: str, step: Callable[[dict], dict]) -> Callable[[dict], dict]:
+        """Record how long each step took (shown on the dashboard)."""
+        def wrapper(state: dict) -> dict:
+            started = time.monotonic()
+            try:
+                return step(state)
+            finally:
+                state.setdefault("timings", {})[name] = round(time.monotonic() - started, 2)
+        return wrapper
 
     # ---- steps ------------------------------------------------------------
     def _step_retrieve(self, state: dict) -> dict:
@@ -138,7 +162,11 @@ class ResearchWorkflow:
     def _step_hypothesis(self, state: dict) -> dict:
         if state.get("stop"):
             return state
-        hyp = state["hypothesis"] = self.hypothesis_agent.run(state["topic"], state["review"], state["evidence"])
+        state["memory_text"] = ""
+        if self.memory is not None and self.memory_budget > 0:
+            state["memory_text"] = self.memory.render(state["topic"], self.memory_budget, include_mock="TEST MODE" in self.llm_mode)
+        hyp = state["hypothesis"] = self.hypothesis_agent.run(
+            state["topic"], state["review"], state["evidence"], memory_text=state["memory_text"])
         state["hypothesis_grounding"] = self.rag.check(hyp.raw_text, state["context"])
         if hyp.unknown_citations:
             state["warnings"].append(f"Hypothesis cited unretrieved ids: {hyp.unknown_citations}")
@@ -151,7 +179,9 @@ class ResearchWorkflow:
     def _step_experiment(self, state: dict) -> dict:
         if state.get("stop"):
             return state
-        exp = state["experiment"] = self.executor.prepare_experiment(state["hypothesis"])
+        exp = state["experiment"] = self.executor.prepare_experiment(state["hypothesis"], memory_text=state.get("memory_text", ""))
+        if exp.note:
+            state["warnings"].append(f"Experiment design: {exp.note}")
         if exp.truncated:
             state["warnings"].append("Generated code looks cut off (token limit reached). Raise LLM_MAX_TOKENS in .env.")
         if not exp.syntax_ok:
@@ -165,6 +195,11 @@ class ResearchWorkflow:
         if self.sandbox is None:
             state["warnings"].append("Experiment was not executed (execution disabled for this run).")
             return state
+        if self.before_execute is not None:
+            try:
+                self.before_execute()
+            except Exception as exc:                          # freeing memory is a courtesy, never a reason to stop
+                logger.warning("Could not run the before-execute hook: %s", exc)
         availability = self.sandbox.check_available()
         if not availability.ok:
             state["execution"] = ExecutionOutcome([], Status.SANDBOX_UNAVAILABLE, availability.message)
@@ -177,12 +212,23 @@ class ResearchWorkflow:
                 f"Experiment ended with {outcome.final_status} after {len(outcome.attempts)} attempt(s): {outcome.message}")
         return state
 
+    def _step_critic(self, state: dict) -> dict:
+        """Check the statistics of the experiment output. Runs only if something was executed."""
+        outcome = state.get("execution")
+        if state.get("stop") or outcome is None or outcome.final_result is None:
+            return state
+        last = outcome.final_result
+        report = state["critic"] = self.critic.evaluate(last.stdout, last.status, last.output_truncated)
+        state["warnings"].extend(
+            f"Critic: {f.message}" for f in report.findings if f.severity in ("error", "warning") and f.code != "NO_RESULT")
+        return state
+
     # ---- public -------------------------------------------------------------
     def run(self, topic: str) -> WorkflowResult:
         if not topic or not topic.strip():
             raise ValueError("Topic must be a non-empty string.")
-        state = self._pipeline.invoke({"topic": topic.strip(), "warnings": []})
-        return WorkflowResult(
+        state = self._pipeline.invoke({"topic": topic.strip(), "warnings": [], "timings": {}})
+        result = WorkflowResult(
             topic=state["topic"],
             llm_mode=self.llm_mode,
             status="NO_EVIDENCE" if state.get("stop") else "COMPLETED",
@@ -193,5 +239,17 @@ class ResearchWorkflow:
             review_grounding=state.get("review_grounding"),
             hypothesis_grounding=state.get("hypothesis_grounding"),
             execution=state.get("execution"),
+            critic=state.get("critic"),
+            step_seconds=state.get("timings", {}),
             warnings=state["warnings"],
         )
+        if self.memory is not None and result.status == "COMPLETED":
+            try:
+                self.memory.add(
+                    topic=result.topic, hypothesis=(result.hypothesis.statement if result.hypothesis else "")[:300],
+                    design=(result.experiment.design_summary or "free-form code") if result.experiment else "none",
+                    execution_status=result.execution_status,
+                    critic_verdict=result.critic.verdict if result.critic else "none", llm_mode=self.llm_mode)
+            except OSError as exc:
+                logger.warning("Could not save to memory: %s", exc)
+        return result
