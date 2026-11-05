@@ -40,7 +40,7 @@ def _build_ollama(settings: Settings) -> BaseChatModel:
     except ImportError as exc:
         raise ConfigError(
             "LLM_PROVIDER=ollama needs the Python package: pip install -r requirements-llm.txt "
-            "(and the Ollama app installed and running; see docs/setup_guide.md)"
+            "(and the Ollama app installed and running; see the README)"
         ) from exc
     return ChatOllama(
         model=settings.ollama_model,
