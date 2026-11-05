@@ -20,7 +20,7 @@ This project is a work in progress. What is not built yet is listed at the end.
 ## How it works
 
 - **Ingestion:** the arXiv API is queried and papers are stored in a local SQLite database.
-- **Search:** each paper is turned into a vector and the closest ones to a topic are returned. The default method compares shared words. Semantic embeddings through Ollama are optional.
+- **Search:** each paper is turned into a vector and the closest ones to a topic are returned. Without any settings file the program compares shared words (hashing). The example settings file uses semantic embeddings through Ollama.
 - **Agents:** three LangChain prompt chains. The language model is a single setting, so another provider can be added later.
 - **Citation checks:** agents must cite retrieved papers as `[arxiv:ID]`. If an answer cites none, the model is asked once more. Citations to papers that were never retrieved are flagged. These checks catch obvious problems but do not prove a claim is true.
 - **Sandbox:** generated code runs only inside Docker, never directly on your computer.
@@ -92,7 +92,7 @@ Settings are read from `.env` (see `.env.example`).
 - `LLM_PROVIDER`: `ollama` for a real local model, `test` for the mock.
 - `OLLAMA_MODEL`: the model name used with `ollama pull`.
 - `LLM_MAX_TOKENS`: maximum length of an answer. Raise it if generated code is cut off.
-- `EMBEDDING_BACKEND`: `hashing` (default) or `ollama` for semantic search.
+- `EMBEDDING_BACKEND`: `ollama` in `.env.example` (semantic search, needs `ollama pull nomic-embed-text`); -`hashing` is the built-in default when no `.env` exists.
 - `CITATION_RETRIES`: extra tries when an answer cites no retrieved paper.
 - `MAX_REPAIR_RETRIES`: repair attempts after a failed run.
 - `SANDBOX_TIMEOUT_SECONDS` and `SANDBOX_MEMORY_MB`: limits for generated code.
