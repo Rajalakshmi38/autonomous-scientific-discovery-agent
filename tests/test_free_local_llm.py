@@ -55,6 +55,8 @@ class FakeOllama(BaseHTTPRequestHandler):
                 {**base, "message": {"role": "assistant", "content": "world"}, "done": True, "done_reason": "stop"},
             ]
             self._send(200, ("\n".join(json.dumps(l) for l in lines) + "\n").encode(), "application/x-ndjson")
+        elif self.path == "/api/generate":
+            self._send(200, {"model": req["model"], "done": True, "done_reason": "unload"})
         elif self.path == "/api/embed":
             if req["model"] == "missing-model":
                 self._send(404, {"error": "model not found"})
@@ -198,3 +200,16 @@ def test_cli_check_llm_and_check_system(monkeypatch, tmp_path, fake_ollama, caps
     assert "available" in capsys.readouterr().out
     assert main(["check-system"]) == 0
     assert "RAM" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------- freeing memory before the sandbox starts
+def test_unload_model_sends_keep_alive_zero(fake_ollama):
+    from src.llm.ollama_check import unload_model
+    assert unload_model(fake_ollama.url, "llama3.2:3b") is True
+    path, req = fake_ollama.requests[-1]
+    assert path == "/api/generate" and req == {"model": "llama3.2:3b", "keep_alive": 0}
+
+
+def test_unload_model_reports_failure_instead_of_raising():
+    from src.llm.ollama_check import unload_model
+    assert unload_model(DEAD_URL, "llama3.2:3b", timeout=2) is False
