@@ -222,3 +222,12 @@ def test_figures_command_end_to_end(monkeypatch, tmp_path, capsys):
     assert load_manifest(paper_dir(tmp_path / "d" / "figures", "arxiv:1"))
     assert main(["figures", "--paper", "arxiv:999"]) == 1
     assert "not stored" in capsys.readouterr().out
+
+
+def test_find_captions_drops_a_page_number_under_the_caption():
+    text = "Figure 2: The analysis view, showing a map.\n7\n"
+    assert find_captions(text) == [("Figure 2", "The analysis view, showing a map.")]
+
+
+def test_find_captions_keeps_a_number_that_ends_the_sentence():
+    assert find_captions("Figure 6: Loss after epoch 50\n") == [("Figure 6", "Loss after epoch 50")]

@@ -90,6 +90,10 @@ def find_captions(page_text: str, max_chars: int = 300) -> List[Tuple[str, str]]
         end = matches[i + 1].start() if i + 1 < len(matches) else len(page_text)
         block = page_text[m.end():end]
         block = re.split(r"\n\s*\n", block, maxsplit=1)[0]          # a caption ends at a blank line
+        lines = block.rstrip().split("\n")
+        while len(lines) > 1 and re.fullmatch(r"\s*\d{1,4}\s*", lines[-1]):
+            lines.pop()                                              # a page number under the caption is not part of it
+        block = "\n".join(lines)
         text = re.sub(r"\s+", " ", block).strip()[:max_chars]
         if len(text) >= 8:
             found.append((f"Figure {m.group(1)}", text))
