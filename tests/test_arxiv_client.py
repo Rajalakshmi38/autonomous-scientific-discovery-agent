@@ -182,3 +182,14 @@ def test_live_arxiv_search():
     papers = ArxivClient().search("graph neural networks", max_results=3)
     assert 1 <= len(papers) <= 3
     assert all(p.title and p.url for p in papers)
+
+
+def test_build_query_drops_filler_words():
+    assert build_search_query("random forest number of trees", "cs.LG") == (
+        "all:random AND all:forest AND all:number AND all:trees AND cat:cs.LG")
+    assert build_search_query("choice of k in nearest neighbors") == (
+        "all:choice AND all:k AND all:nearest AND all:neighbors")
+
+
+def test_build_query_keeps_words_when_all_are_filler():
+    assert build_search_query("of the") == "all:of AND all:the"

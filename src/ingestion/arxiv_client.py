@@ -30,15 +30,21 @@ _ID_RE = re.compile(r"arxiv\.org/abs/(?P<id>.+?)(?:v(?P<ver>\d+))?$")
 _TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\+\.]*")
 _CATEGORY_RE = re.compile(r"^[A-Za-z\-]+(\.[A-Za-z\-]+)?$")
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+# Filler words are dropped from the search, because every remaining word must match and "of" or "the" only
+# make a query return nothing. If a query is made ONLY of such words, they are all kept.
+_FILLER_WORDS = {"a", "an", "the", "of", "in", "on", "for", "to", "with", "by", "from", "at", "is", "are",
+                 "as", "and", "or", "via", "using", "into"}
 
 
 def build_search_query(topic: str, category: Optional[str] = None) -> str:
-    """Turn free text into an arXiv ``search_query`` (all terms must match)."""
+    """Turn free text into an arXiv ``search_query`` (all terms must match; filler words such as "of" are dropped)."""
     if not isinstance(topic, str) or not topic.strip():
         raise ValueError("Search topic must be a non-empty string.")
     terms = _TERM_RE.findall(topic)
     if not terms:
         raise ValueError(f"No searchable words found in topic: {topic!r}")
+    content_terms = [t for t in terms if t.lower() not in _FILLER_WORDS]
+    terms = content_terms or terms
     query = " AND ".join(f"all:{t}" for t in terms)
     if category:
         if not _CATEGORY_RE.match(category):
