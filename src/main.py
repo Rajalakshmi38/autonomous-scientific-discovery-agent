@@ -293,6 +293,7 @@ def cmd_run(settings: Settings, args) -> int:
             print(f"[{e.paper.uid}] {e.paper.title[:80]}  score={e.score:.3f}\n    {e.paper.url}")
         print(f"\n--- Literature review ---\n{result.review.summary}")
         print(f"\n--- Hypothesis ---\n{result.hypothesis.statement}")
+        print(f"\n--- Test plan (written by the model) ---\n{result.hypothesis.test_plan or '(none given)'}")
         print("\n--- Sources cited by the hypothesis ---")
         if result.sources:
             for src in result.sources:
