@@ -16,7 +16,7 @@ from src.agents.hypothesis_generator import Hypothesis
 from src.critic.critic import StatisticalCritic, Verdict
 from src.experiments.spec import (
     DATASETS, MODEL_OPTIONS, SpecError, confounding_factors, default_spec, normalise_raw, options_text, parse_spec_text, render_script,
-    spec_from_text, validate_spec, validate_spec_tolerant,
+    design_mismatch_note, spec_from_text, validate_spec, validate_spec_tolerant,
 )
 from src.llm.stub_model import RuleBasedStubChatModel
 
@@ -321,3 +321,67 @@ def test_every_fallback_design_changes_exactly_one_thing():
         assert len(confounding_factors(spec)) == 1, text
     assert len(confounding_factors(default_spec())) == 1
     assert set(_ONE_MODEL_SETTINGS) >= {"random_forest", "knn", "svm"}
+
+
+# ------------------------------------------------------------------ the design must fit what the hypothesis says
+@pytest.mark.parametrize("text, summary", [
+    ("Increasing the number of trees in a Random Forest from 10 to 100 raises the score [arxiv:2606.03549].",
+     "iris: random_forest(n_estimators=100) vs random_forest(n_estimators=10), accuracy, 20 resamples"),
+    ("A k-NN with k=11 beats a k-NN with k=1 on wine.",
+     "wine: knn(n_neighbors=11) vs knn(n_neighbors=1), accuracy, 20 resamples"),
+])
+def test_keyword_rules_read_two_values_of_a_setting(text, summary):
+    spec, why = spec_from_text(text)
+    assert spec is not None and spec.summary() == summary and "two values" in why
+    assert len(confounding_factors(spec)) == 1
+
+
+def test_numbers_inside_a_citation_are_not_used_as_values():
+    spec, _ = spec_from_text("More trees in a random forest help [arxiv:2606.03549].")
+    assert spec.summary() == "iris: random_forest(n_estimators=100) vs random_forest(n_estimators=10), accuracy, 20 resamples"
+
+
+def test_the_hypothesis_sentence_beats_a_scaling_word_in_the_test_plan():
+    hyp = Hypothesis("Increasing the number of trees in a Random Forest from 10 to 100 raises accuracy.", "r",
+                     "Use 20 resamples; scaling is not needed.", "raw")
+    plan = CodeExecutorAgent(FakeListChatModel(responses=["no json"]), mode="spec", spec_retries=1).prepare_experiment(hyp)
+    assert plan.source == "keyword_spec"
+    assert plan.spec["baseline"]["params"] == {"n_estimators": 10} and plan.spec["treatment"]["params"] == {"n_estimators": 100}
+    assert not plan.spec["baseline"]["scale"] and not plan.spec["treatment"]["scale"]
+
+
+def test_a_test_plan_is_used_only_when_the_hypothesis_sentence_has_nothing():
+    hyp = Hypothesis("The new method is better.", "r", "Compare k-NN with and without scaling on wine.", "raw")
+    plan = CodeExecutorAgent(FakeListChatModel(responses=["no json"]), mode="spec", spec_retries=1).prepare_experiment(hyp)
+    assert plan.source == "keyword_spec" and plan.spec["treatment"]["scale"] is True
+    assert "test plan" in plan.note
+
+
+def _design(base, treat):
+    return validate_spec({"dataset": "iris", "baseline": base, "treatment": treat})
+
+
+def test_mismatch_note_when_the_hypothesis_names_no_testable_method():
+    design = _design({"model": "logistic_regression"}, {"model": "logistic_regression", "scale": True})
+    note = design_mismatch_note(design, "Weighted STreeD will outperform standard STreeD on iris.")
+    assert "names none of the methods" in note and "does not mention scaling" in note
+
+
+def test_mismatch_note_when_the_design_uses_a_method_the_hypothesis_does_not_name():
+    design = _design({"model": "random_forest"}, {"model": "logistic_regression"})
+    note = design_mismatch_note(design, "A random forest with 100 trees scores higher than one with 10 trees.")
+    assert "uses logistic_regression" in note
+
+
+def test_no_mismatch_note_when_the_design_fits():
+    design = _design({"model": "random_forest", "params": {"n_estimators": 10}},
+                     {"model": "random_forest", "params": {"n_estimators": 100}})
+    assert design_mismatch_note(design, "A random forest with 100 trees scores higher than one with 10 trees.") == ""
+
+
+def test_the_agent_warns_when_the_models_valid_design_does_not_fit_the_hypothesis():
+    hyp = Hypothesis("A random forest with 100 trees scores higher than one with 10 trees.", "r", "plan", "raw")
+    reply = json.dumps(good(baseline={"model": "logistic_regression", "params": {}, "scale": False},
+                            treatment={"model": "logistic_regression", "params": {}, "scale": True}))
+    plan = CodeExecutorAgent(FakeListChatModel(responses=[reply]), mode="spec").prepare_experiment(hyp)
+    assert plan.source == "model_spec" and "Possible mismatch" in plan.note and "random_forest" in plan.note

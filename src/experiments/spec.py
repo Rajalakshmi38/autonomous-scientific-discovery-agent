@@ -318,6 +318,59 @@ _ONE_MODEL_SETTINGS = {                       # model -> (low setting, high sett
 }
 
 
+_CITATION = re.compile(r"\[[^\]]*\]")
+_SETTING_WORDS = {                                # model -> (words that name its main setting, parameter name)
+    "random_forest": (re.compile(r"\btrees?\b|\bestimators?\b|n_estimators", re.IGNORECASE), "n_estimators"),
+    "knn": (re.compile(r"\bneighbou?rs?\b|\bk\s*=|\bvalue of k\b|\bchoice of k\b", re.IGNORECASE), "n_neighbors"),
+}
+_NUMBER = re.compile(r"(?<![\w.])(\d{1,3})(?![\w.%])")
+
+
+def _nearest_allowed(value: int, allowed: list) -> int:
+    """The allowed value nearest to ``value`` (the lower one on a tie)."""
+    return min((a for a in allowed if isinstance(a, int) and not isinstance(a, bool)), key=lambda a: (abs(a - value), a))
+
+
+def _setting_pair(model: str, text: str) -> Optional[Tuple[str, int, int]]:
+    """(parameter, low, high) when the text compares two values of a model's main setting, such as
+    'the number of trees ... from 10 to 100'. Only numbers close to the setting's name are used, and they are
+    moved to the nearest allowed value. Returns None when fewer than two different values are found."""
+    if model not in _SETTING_WORDS:
+        return None
+    words, param = _SETTING_WORDS[model]
+    clean = _CITATION.sub(" ", text or "")
+    hit = words.search(clean)
+    if not hit:
+        return None
+    window = clean[max(0, hit.start() - 30): hit.end() + 90]
+    allowed = MODEL_OPTIONS[model][param]
+    values = sorted({_nearest_allowed(int(n), allowed) for n in _NUMBER.findall(window)})
+    if len(values) < 2:
+        return None
+    return param, values[0], values[-1]
+
+
+def design_mismatch_note(spec: "ExperimentSpec", statement: str) -> str:
+    """Plain check, no language model: does the design contain what the hypothesis names? Returns '' when it does."""
+    clean = _CITATION.sub(" ", statement or "")
+    named = [name for name, pattern in _TEXT_MODELS.items() if pattern.search(clean)]
+    used = {spec.baseline.model, spec.treatment.model}
+    notes: List[str] = []
+    if named:
+        missing = [m for m in named if m not in used]
+        extra = sorted(used - set(named))
+        if missing:
+            notes.append("the hypothesis names " + ", ".join(missing) + ", which the experiment does not use")
+        if extra:
+            notes.append("the experiment uses " + ", ".join(extra) + ", which the hypothesis does not mention")
+    else:
+        notes.append("the hypothesis names none of the methods the experiment can run (" + ", ".join(sorted(_TEXT_MODELS))
+                     + "), so the experiment is only a stand-in for the topic")
+    if spec.baseline.scale != spec.treatment.scale and not _SCALING_WORDS.search(clean):
+        notes.append("the experiment compares feature scaling, but the hypothesis does not mention scaling")
+    return ("Possible mismatch with the hypothesis: " + "; ".join(notes) + ".") if notes else ""
+
+
 def spec_from_text(text: str) -> Tuple[Optional["ExperimentSpec"], str]:
     """Build a design from keywords in a hypothesis by fixed rules. NOT a language model. Returns (spec or None, explanation)."""
     text = text or ""
@@ -327,6 +380,12 @@ def spec_from_text(text: str) -> Tuple[Optional["ExperimentSpec"], str]:
     dataset = next((name for name, pattern in _TEXT_DATASETS.items() if pattern.search(text)), None)
     scaling = bool(_SCALING_WORDS.search(text))
 
+    for model in models:                                 # two values of one setting, e.g. "trees from 10 to 100"
+        pair = _setting_pair(model, text)
+        if pair:
+            param, low, high = pair
+            spec = ExperimentSpec(dataset or "iris", ModelSpec(model, {param: low}, False), ModelSpec(model, {param: high}, False))
+            return spec, f"the hypothesis compares two values of {param} for {model} ({low} and {high}), so they were compared"
     if scaling:
         model = models[0] if models else "knn"
         spec = ExperimentSpec(dataset or "wine", ModelSpec(model, {}, False), ModelSpec(model, {}, True))
