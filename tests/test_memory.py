@@ -63,3 +63,13 @@ def test_memory_command(monkeypatch, tmp_path, capsys):
     add(MemoryStore(tmp_path / "s" / "memory.jsonl"), "graph neural networks")
     assert main(["memory"]) == 0
     assert "graph neural networks" in capsys.readouterr().out
+
+
+def test_rendered_note_does_not_contain_the_old_hypothesis_text(tmp_path):
+    store = MemoryStore(tmp_path / "memory.jsonl")
+    store.add(topic="random forest number of trees", hypothesis="Sentinel-2 tree species with n=100 versus n=500",
+              design="iris: random_forest(n_estimators=10) vs random_forest(n_estimators=50)",
+              execution_status="SUCCESS", critic_verdict="INCONCLUSIVE", llm_mode="ollama:test")
+    note = store.render("random forest number of trees")
+    assert "Sentinel-2" not in note and "n=500" not in note
+    assert "random_forest(n_estimators=10)" in note and "INCONCLUSIVE" in note

@@ -3,6 +3,8 @@
 Each finished run adds one line to ``storage/memory.jsonl``. Before the hypothesis and experiment are
 written, the most relevant earlier attempts on a similar topic are rendered as a short, size-limited note
 that goes into the prompt. This is context management, not learning: the model is only SHOWN what happened.
+The note lists earlier experiment designs and results, but not earlier hypothesis text, because a 3B model
+copied that text into new hypotheses in real runs.
 
 Mock-model (TEST MODE) runs are kept out of the memory of real runs, so placeholder text never steers a
 real model.
@@ -20,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 _WORD = re.compile(r"[a-z][a-z0-9\-]{2,}")
 _STOP = frozenset("the and for with from that this into using use based between over under about study".split())
-HEADER = ("Previous attempts on similar topics (newest first). Do not repeat a design that already failed or was "
-          "inconclusive unless you change something important.")
+HEADER = ("Previous attempts on similar topics (newest first; experiments only, old hypotheses are left out on purpose: "
+          "write a NEW hypothesis from the papers above, not a copy of an old one). Do not repeat a design that "
+          "already failed or was inconclusive unless you change something important.")
 
 
 def _tokens(text: str) -> set:
@@ -71,8 +74,8 @@ class MemoryStore:
         lines: List[str] = []
         used = len(HEADER)
         for e in self.similar(topic, include_mock=include_mock):
-            line = (f"- {e.get('when', '?')}: hypothesis: {str(e.get('hypothesis', ''))[:200]} | "
-                    f"experiment: {str(e.get('design', 'unknown'))[:120]} | "
+            # The earlier hypothesis text is NOT shown: a small model copies it (seen in real runs).
+            line = (f"- {e.get('when', '?')}: experiment: {str(e.get('design', 'unknown'))[:120]} | "
                     f"result: {e.get('execution_status', '?')}, critic: {e.get('critic_verdict', 'none')}")
             if used + len(line) > budget_chars:
                 break
