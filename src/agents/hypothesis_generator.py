@@ -27,7 +27,12 @@ EXPERIMENT_SCOPE = (
     "treatment that differ in exactly ONE thing (the method, OR one setting of the same method, OR feature scaling) on "
     "ONE of these small datasets: iris, wine, breast_cancer, "
     "digits, measured by accuracy or macro-F1. Phrase the HYPOTHESIS as a testable claim about that comparison, "
-    "informed by the papers."
+    "informed by the papers. The comparison can only use these methods: logistic regression, decision tree, random "
+    "forest (number of trees 5, 10, 50 or 100), k-nearest neighbors (k of 1, 3, 5, 11 or 25), naive Bayes and SVM. "
+    "Name the two things compared in the HYPOTHESIS sentence itself (for a setting, give both values, for example "
+    "'a random forest with 100 trees scores higher than one with 10 trees'). Do not propose new algorithms, "
+    "optimizers, hyperparameter search methods, computation time, or data other than those four datasets: the "
+    "experiment cannot test them."
 )
 
 SYSTEM = (
