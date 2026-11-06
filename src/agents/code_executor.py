@@ -21,7 +21,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from src.agents.base import AgentError
 from src.agents.hypothesis_generator import Hypothesis
 from src.experiments.spec import (
-    SpecError, default_spec, options_text, parse_spec_text, render_script, spec_from_text, validate_spec_tolerant,
+    SpecError, default_spec, design_mismatch_note, options_text, parse_spec_text, render_script, spec_from_text, validate_spec_tolerant,
 )
 
 LIBRARIES_TEXT = "the Python standard library, numpy, scipy, pandas and scikit-learn"
@@ -227,15 +227,22 @@ class CodeExecutorAgent:
                 problem = f"Your previous reply was rejected: {last_error}\nReply again with one corrected JSON object."
                 continue
             note = ("The model's design was adjusted to allowed options: " + "; ".join(adjustments) + ".") if adjustments else ""
+            mismatch = design_mismatch_note(spec, hypothesis.statement)
+            note = " ".join(x for x in (note, mismatch) if x)
             return ExperimentPlan(code=render_script(spec), syntax_ok=True, source="model_spec",
                                   spec=spec.to_dict(), design_summary=spec.summary(), note=note)
-        derived, why = spec_from_text(f"{hypothesis.statement} {hypothesis.test_plan}")
+        derived, why = spec_from_text(hypothesis.statement)          # the claim itself comes first
+        if derived is None:
+            derived, why = spec_from_text(f"{hypothesis.statement} {hypothesis.test_plan}")
+            why += " (found in the test plan, not in the hypothesis sentence)"
         if derived is not None:
+            mismatch = design_mismatch_note(derived, hypothesis.statement)
             return ExperimentPlan(
                 code=render_script(derived), syntax_ok=True, source="keyword_spec", spec=derived.to_dict(),
                 design_summary=derived.summary(),
                 note=("The model's design was invalid (" + last_error[:100] + "), so the design was derived from keywords in "
-                      "the hypothesis by simple fixed rules (no language model): " + why + ". Check that it fits the hypothesis."))
+                      "the hypothesis by simple fixed rules (no language model): " + why + ". Check that it fits the hypothesis."
+                      + (" " + mismatch if mismatch else "")))
         fallback = default_spec()
         return ExperimentPlan(
             code=render_script(fallback), syntax_ok=True, source="default_spec", spec=fallback.to_dict(),
