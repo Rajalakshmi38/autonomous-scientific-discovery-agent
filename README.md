@@ -1,10 +1,10 @@
 # Autonomous Multimodal Scientific Discovery Agent
 
-An AI research assistant that finds recent papers on arXiv, summarises them, proposes a testable hypothesis, writes a small Python experiment, and runs it inside an isolated Docker container.
+An AI research assistant that finds recent papers on arXiv, summarises them, proposes a testable hypothesis, designs a small experiment, runs it inside an isolated Docker container, and checks the result with statistics.
 
 It uses free tools only: a local language model through Ollama, local search, and Docker. No API key, paid account or billing details are needed.
 
-This project is a work in progress. What is not built yet is listed at the end.
+This project is a work in progress. The limits and what is not built yet are listed near the end. Please read them: the experiments are small checks on toy datasets, not research findings.
 
 ## What it does
 
@@ -12,10 +12,11 @@ This project is a work in progress. What is not built yet is listed at the end.
 2. Searches the stored papers for a research topic.
 3. The Literature Reviewer agent summarises the evidence and cites papers by identifier.
 4. The Hypothesis Generator agent proposes a testable hypothesis based on that evidence.
-5. The Code Executor agent writes a Python experiment for the hypothesis.
+5. The Code Executor agent designs a small experiment for the hypothesis. By default the model only fills in a form (dataset, metric, two methods or settings) and tested code writes the script.
 6. The sandbox runs the experiment in a restricted Docker container and captures the output.
-7. If the code fails, the error is sent back to the model for a fix, a limited number of times.
-8. Every run is saved as a record with the sources, code, attempts, output and warnings.
+7. A statistical critic checks the numbers: it reports the difference, a confidence interval and a p-value, and says when the result is inconclusive.
+8. Every run is saved as a record with the sources, design, code, output and warnings. A short note about earlier runs on similar topics is shown to the model in later runs.
+9. Optionally, captions and page images of figures can be taken from a paper's PDF and added to the evidence.
 
 ## How it works
 
@@ -24,7 +25,11 @@ This project is a work in progress. What is not built yet is listed at the end.
 - **Agents:** three LangChain prompt chains. The language model is a single setting, so another provider can be added later.
 - **Citation checks:** agents must cite retrieved papers as `[arxiv:ID]`. If an answer cites none, the model is asked once more. Citations to papers that were never retrieved are flagged. These checks catch obvious problems but do not prove a claim is true.
 - **Sandbox:** generated code runs only inside Docker, never directly on your computer.
-- **Repair loop:** after a failed run the error goes back to the model, up to a set number of times. It is a plain retry loop, not reinforcement learning.
+- **Experiment design:** in the default `spec` mode the model fills in a form with a dataset (iris, wine, breast_cancer or digits), a metric, and two things to compare. The form is checked, and a vetted template writes the script, so the model cannot write unsafe or broken code. The two things must differ in exactly one respect, such as 10 trees against 100 trees, or with and without feature scaling. If the model's form is invalid after a few tries, fixed keyword rules build a design from the hypothesis sentence, and the output says so. A plain check then warns when the design does not seem to match the hypothesis.
+- **Statistical critic:** rule-based, no language model. It uses a corrected resampled t-test (Nadeau and Bengio) because repeated splits of the same data are not independent. It reports a mean difference with a 95% confidence interval and never calls a non-significant result proof of no effect.
+- **Memory:** earlier designs and results are shown to the model as a short note. Earlier hypothesis text is left out on purpose, because a small model copied it into new hypotheses. This is context only, not learning.
+- **Figures:** `figures` downloads a stored paper's PDF, finds captions that start a line with `Figure N:`, and saves the pages as images. Captions are added to the evidence in later runs. An optional vision model setting exists but has not been tested on small hardware.
+- **Repair loop:** only used in `free` mode, where the model writes the code itself. After a failed run the error goes back to the model, up to a set number of times. It is a plain retry loop, not reinforcement learning.
 - **Test mode:** without a language model the project uses a rule-based mock that prints fixed placeholder text. It is labelled TEST MODE and does not reason.
 
 Paper text and model output are treated as untrusted.
@@ -45,13 +50,16 @@ pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 ```
 
-Download a language model that fits your PC:
+Download a language model that fits your PC. The project was tested with `llama3.2:3b` on a laptop with 8 GB of RAM and no GPU. A smaller `llama3.2:1b` also exists.
 
 ```powershell
-ollama pull llama3.2:1b
+ollama pull llama3.2:3b
+ollama pull nomic-embed-text
 ```
 
-In `.env`, set `LLM_PROVIDER=ollama` and `OLLAMA_MODEL=llama3.2:1b`, then check it:
+`nomic-embed-text` is for semantic search. For figure extraction also run `pip install -r requirements-figures.txt`.
+
+In `.env`, set `LLM_PROVIDER=ollama` and `OLLAMA_MODEL=llama3.2:3b`, then check it:
 
 ```powershell
 python -m src.main check-llm
@@ -70,8 +78,8 @@ On a low-memory PC you can limit Docker's memory by creating the file `.wslconfi
 ## Usage
 
 ```powershell
-python -m src.main ingest --query "graph neural networks" --max-results 10
-python -m src.main run --topic "graph neural networks" -k 3
+python -m src.main ingest --query "random forest" --max-results 30 --category cs.LG
+python -m src.main run --topic "random forest number of trees" -k 3
 ```
 
 Other commands:
@@ -79,6 +87,11 @@ Other commands:
 - `search --query "..."` searches the stored papers.
 - `run --topic "..." --provider test` runs everything with the mock model.
 - `run --topic "..." --no-execute` writes the code but does not run it.
+- `run --topic "..." --no-memory` runs without showing or saving earlier attempts.
+- `figures --paper arxiv:ID` extracts figure captions and page images from a stored paper (use `--describe` only if you set up a vision model).
+- `memory` shows what earlier runs the system remembers.
+- `summary` counts the saved runs: results, citations and critic verdicts.
+- `sandbox-status` and `sandbox-test` check the sandbox.
 - `status` shows the model, stored papers and sandbox state.
 - `reindex` rebuilds the search index after changing the embedding setting.
 - `check-system` and `check-llm` check your hardware and the Ollama connection.
@@ -92,10 +105,14 @@ Settings are read from `.env` (see `.env.example`).
 - `LLM_PROVIDER`: `ollama` for a real local model, `test` for the mock.
 - `OLLAMA_MODEL`: the model name used with `ollama pull`.
 - `LLM_MAX_TOKENS`: maximum length of an answer. Raise it if generated code is cut off.
-- `EMBEDDING_BACKEND`: `ollama` in `.env.example` (semantic search, needs `ollama pull nomic-embed-text`); -`hashing` is the built-in default when no `.env` exists.
+- `CODE_MODE`: `spec` (default) or `free`. In `free` mode the model writes the whole script and the repair loop applies.
+- `CRITIC_ALPHA`: significance level used by the critic (default 0.05).
+- `MEMORY_CHAR_BUDGET`: size of the note about earlier runs.
+- `UNLOAD_MODEL_BEFORE_RUN`: frees the language model's memory before the sandbox starts.
+- `EMBEDDING_BACKEND`: `ollama` in `.env.example` (semantic search, needs `ollama pull nomic-embed-text`); `hashing` is the built-in default when no `.env` exists.
 - `CITATION_RETRIES`: extra tries when an answer cites no retrieved paper.
 - `MAX_REPAIR_RETRIES`: repair attempts after a failed run.
-- `SANDBOX_TIMEOUT_SECONDS` and `SANDBOX_MEMORY_MB`: limits for generated code.
+- `SANDBOX_TIMEOUT_SECONDS` (default 120) and `SANDBOX_MEMORY_MB`: limits for the experiment.
 
 ## The sandbox
 
@@ -108,7 +125,7 @@ Generated code is sent to the container through standard input, and no folder fr
 - a time limit, after which the container is killed and removed
 - a cap on how much output is captured
 
-Only Python and numpy are installed, so code that needs other libraries fails with a clear message.
+Only Python, numpy, scipy, pandas and scikit-learn are installed, so code that needs other libraries fails with a clear message.
 
 Run `python -m src.main sandbox-test` on your own machine. It runs scripts that try forbidden things, such as using the network, writing system files, using too much memory, or running forever, and checks that each one is stopped. A pass is evidence that the restrictions work, not a guarantee.
 
@@ -127,11 +144,14 @@ config/settings.py        settings read from environment variables
 src/main.py               command-line interface
 src/workflow.py           runs the steps in order
 src/agents/               literature reviewer, hypothesis generator, code executor
-src/ingestion/            arXiv client and paper storage
+src/experiments/          the checked experiment form and the script template
+src/critic/               statistical critic
+src/memory/               note about earlier runs
+src/ingestion/            arXiv client, paper storage, figure extraction
 src/retrieval/            embeddings, vector index, search, citation checks
 src/llm/                  model selection, mock model, Ollama check
 src/execution/            Docker sandbox, repair loop, sandbox self-test
-src/utils/                logging and hardware check
+src/utils/                logging, hardware check, run summary
 sandbox/Dockerfile        the sandbox image
 tests/                    automatic tests
 ```
@@ -140,15 +160,18 @@ tests/                    automatic tests
 
 - Output quality depends on the model. Small local models often write code that fails or describe papers inaccurately. Treat summaries and hypotheses as drafts that need human review.
 - Experiment numbers are real outputs of model-written code. They are not verified research findings.
-- The default search matches shared words, not meaning.
-- There is no reinforcement learning. The repair loop only shows the model an error and asks for new code. Nothing is trained or remembered between runs.
+- Without a settings file the search matches shared words, not meaning. Semantic search is better but still weak when few stored papers cover a topic.
+- The experiments use four small bundled datasets and six simple methods. A hypothesis about anything else, such as a new algorithm or real satellite data, can only be tested through a stand-in comparison. The program warns when the design seems not to match the hypothesis, but that check is simple and can miss a mismatch.
+- A 3B model often writes a form that changes more than one thing, so the fixed keyword rules often build the design. The hypothesis wording can also be wrong, for example calling two fixed settings "fixed versus variable".
+- So far the real runs on iris have all been inconclusive. A result on a toy dataset describes that dataset only.
+- There is no reinforcement learning. The repair loop only shows the model an error and asks for new code, and in real use with a 3B model it has not yet fixed a failing script. Memory only shows earlier results as context. Nothing is trained.
+- The optional vision model for figures has not been tested on this hardware. Figure captions are found only when they start a line with `Figure N:` or `Fig. N.`, and tables are not extracted.
 - Only arXiv works. PubMed is a placeholder.
 
 ## Not built yet
 
-- Extracting charts and figures from paper PDFs, with a vision-language model
-- A critic agent with statistical checks such as p-values and confidence intervals
 - Research draft generation from verified results
+- Evaluation on held-out cases
 - A monitoring dashboard
 - A reinforcement-learning component
 - PubMed ingestion
