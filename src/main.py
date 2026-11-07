@@ -159,6 +159,22 @@ def cmd_summary(settings: Settings, _args) -> int:
     return 0
 
 
+def cmd_draft(settings: Settings, args) -> int:
+    from src.draft.generator import latest_record_path, write_draft
+    path = Path(args.run) if args.run else latest_record_path(settings.runs_dir)
+    if path is None or not Path(path).exists():
+        print("No run record found. Run: python -m src.main run --topic \"...\" first, or pass --run FILE.")
+        return 1
+    kind, files = write_draft(path, settings.storage_dir / "drafts", args.format)
+    if kind == "paper":
+        print(f"Wrote a draft from {Path(path).name}. It is AI-assisted, unreviewed and not a verified research finding.")
+    else:
+        print(f"That run has no verified result, so a FAILED RUN REPORT was written instead of a paper ({Path(path).name}).")
+    for f in files:
+        print(f"  {f}")
+    return 0
+
+
 def cmd_check_system(settings: Settings, _args) -> int:
     info = get_system_info()
     rec = recommend(info)
@@ -376,6 +392,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--describe", action="store_true", help="also ask the optional vision model to describe up to 3 figures")
     p.set_defaults(func=cmd_figures)
     sub.add_parser("memory", help="show what earlier runs the system remembers").set_defaults(func=cmd_memory)
+    p = sub.add_parser("draft", help="write a draft (or a failed run report) from a saved run record")
+    p.add_argument("--run", default=None, help="run record file (default: the newest run with a real model)")
+    p.add_argument("--format", choices=["md", "tex", "both"], default="both")
+    p.set_defaults(func=cmd_draft)
+
     sub.add_parser("summary", help="count the saved runs: results, citations, critic verdicts").set_defaults(func=cmd_summary)
     sub.add_parser("reindex", help="rebuild the vector index from stored papers").set_defaults(func=cmd_reindex)
     return parser
