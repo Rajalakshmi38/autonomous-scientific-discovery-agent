@@ -16,7 +16,7 @@ RECORD = {
                  {"id": "arxiv:2222.22222", "title": "Other paper", "url": "https://arxiv.org/abs/2222.22222v1", "score": 0.6}],
     "sources_cited_by_hypothesis": [{"id": "arxiv:1111.11111", "title": "t", "url": "u"}],
     "review": {"summary": "Variance of order epsilon \u03b5^(-2). [arxiv:1111.11111]"},
-    "hypothesis": {"statement": "A forest with 50 trees scores higher than one with 5 trees on iris.",
+    "hypothesis": {"statement": "A random forest with 50 trees scores higher than one with 5 trees on iris.",
                    "rationale": "More trees lower variance.", "test_plan": "Compare both on iris."},
     "experiment": {"source": "model_spec", "design_summary": "iris: random_forest(n_estimators=50) vs random_forest(n_estimators=5), accuracy, 20 resamples",
                    "spec": {"dataset": "iris", "metric": "accuracy", "n_resamples": 20, "test_size": 0.3, "seed": 0,
@@ -45,7 +45,7 @@ def test_a_successful_run_gives_a_paper_with_the_critic_lines_copied_unchanged()
     assert d.kind == "paper" and md.startswith("# Draft report: random forest number of trees")
     assert LINE in md                                                    # copied word for word
     assert [h for h, _ in d.sections] == ["Introduction", "Method", "Results", "Limitations", "References"]
-    assert "A forest with 50 trees scores higher" in md and "random_forest(n_estimators=50)" in md
+    assert "A random forest with 50 trees scores higher" in md and "random_forest(n_estimators=50)" in md
     assert "has not been peer reviewed" in md and "not a verified research finding" in md
     assert "(cited by the hypothesis)" in md and "https://arxiv.org/abs/1111.11111v1" in md
     assert "does not show that there is no effect" in md                  # INCONCLUSIVE wording
@@ -152,3 +152,44 @@ def test_cli_draft_writes_files_and_says_which_kind(tmp_path, monkeypatch, capsy
     (runs / "run_20260101_000002.json").write_text(json.dumps(rec(execution_status="TIMEOUT", critic=None)), encoding="utf-8")
     assert main(["draft", "--run", str(runs / "run_20260101_000002.json"), "--format", "md"]) == 0
     assert "FAILED RUN REPORT" in capsys.readouterr().out
+
+
+def test_the_model_summary_keeps_its_paragraphs_and_bullets():
+    r = rec()
+    r["review"]["summary"] = "**Evidence Summary**\n\nThe papers discuss trees.\n\n* [arxiv:1111.11111] first point\n* [arxiv:2222.22222] second point"
+    md = to_markdown(build_draft(r))
+    assert "- [arxiv:1111.11111] first point" in md and "- [arxiv:2222.22222] second point" in md
+    assert "**" not in md and "Evidence Summary" in md
+    assert r"\item [arxiv:1111.11111] first point" in to_latex(build_draft(r))
+
+
+def test_limitations_do_not_repeat_the_same_warning():
+    r = rec()
+    r["warnings"] = ["Critic: The data are a small classic benchmark dataset.", "Experiment design: something new happened."]
+    md = to_markdown(build_draft(r))
+    assert md.count("small classic benchmark dataset") == 1               # also a critic finding, so not repeated
+    assert "Run warning: Experiment design: something new happened." in md  # a new warning is kept
+
+
+def _logistic_design(r):
+    r["experiment"]["spec"]["treatment"] = {"model": "logistic_regression", "params": {}, "scale": False}
+    r["experiment"]["spec"]["baseline"] = {"model": "random_forest", "params": {}, "scale": False}
+    return r
+
+
+def test_an_old_record_gets_the_mismatch_warning_when_the_draft_is_made():
+    md = to_markdown(build_draft(_logistic_design(rec())))
+    assert "Possible mismatch" in md and "uses logistic_regression" in md
+
+
+def test_the_failed_run_report_also_shows_the_mismatch():
+    r = _logistic_design(rec(execution_status="TIMEOUT", critic=None, execution=None))
+    md = to_markdown(build_draft(r))
+    assert md.startswith("# Failed run report") and "Possible mismatch" in md
+
+
+def test_a_matching_design_adds_no_mismatch_line_and_a_stored_one_is_not_repeated():
+    assert "Possible mismatch" not in to_markdown(build_draft(rec()))
+    r = _logistic_design(rec())
+    r["experiment"]["note"] = "Possible mismatch with the hypothesis: the experiment uses logistic_regression, which the hypothesis does not mention."
+    assert to_markdown(build_draft(r)).count("Possible mismatch") == 1

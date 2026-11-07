@@ -125,20 +125,47 @@ def _warning_bullets(record: Dict[str, Any]) -> List[str]:
     return [_short(w, 400) for w in record.get("warnings") or []]
 
 
+def _norm(text: Any) -> str:
+    return re.sub(r"\W+", " ", str(text)).lower().strip()
+
+
+def _recomputed_mismatch(record: Dict[str, Any]) -> str:
+    """Run the design/hypothesis check again, so older records (made before the check existed) get the warning too."""
+    from src.experiments.spec import SpecError, design_mismatch_note, validate_spec
+    exp, hyp = record.get("experiment") or {}, record.get("hypothesis") or {}
+    if not exp.get("spec") or not hyp.get("statement"):
+        return ""
+    try:
+        return design_mismatch_note(validate_spec(exp["spec"]), hyp["statement"])
+    except (SpecError, KeyError, TypeError, ValueError):
+        return ""
+
+
 def _limitations(record: Dict[str, Any]) -> List[Block]:
     critic = record.get("critic") or {}
     exp = record.get("experiment") or {}
-    items = [f"[{f.get('severity')}] {f.get('message')}" for f in critic.get("findings") or []
-             if f.get("severity") in ("warning", "info")]
+    items: List[str] = []
+
+    def add(text: str, check: Optional[str] = None) -> None:
+        """Add a line unless the same sentence is already there (run warnings repeat the critic and design notes)."""
+        n = _norm(check if check is not None else text)
+        if n and not any(n in _norm(i) for i in items):
+            items.append(text)
+    for f in critic.get("findings") or []:
+        if f.get("severity") in ("warning", "info"):
+            add(f"[{f.get('severity')}] {f.get('message')}")
     if exp.get("source") in ("keyword_spec", "default_spec"):
-        items.append(DESIGN_SOURCE_TEXT[exp["source"]])
+        add(DESIGN_SOURCE_TEXT[exp["source"]])
     if exp.get("note"):
-        items.append(_short(exp["note"], 500))
-    items += [f"Run warning: {w}" for w in _warning_bullets(record)]
-    items += ["This is a single automated run. It was not repeated with other datasets, methods or seeds.",
-              "The hypothesis and the literature summary were written by a small language model and can contain "
-              "errors. Check them against the cited papers.",
-              "The experiment may not test the hypothesis exactly. Compare the hypothesis with the design above."]
+        add(_short(exp["note"], 500))
+    for w in _warning_bullets(record):
+        add(f"Run warning: {w}", check=re.sub(r"^(Experiment design|Critic):\s*", "", w))
+    add(_recomputed_mismatch(record))
+    for fixed in ("This is a single automated run. It was not repeated with other datasets, methods or seeds.",
+                  "The hypothesis and the literature summary were written by a small language model and can contain "
+                  "errors. Check them against the cited papers.",
+                  "The experiment may not test the hypothesis exactly. Compare the hypothesis with the design above."):
+        add(fixed)
     return [("bullets", items)]
 
 
@@ -148,6 +175,38 @@ def _interpretation(verdict: str) -> str:
                 "the hypothesis true, and it says nothing about other data.")
     return ("The critic found no significant difference. This does not show that there is no effect: the sample may be "
             "too small to detect one.")
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text).replace("**", "").replace("`", "")).strip()
+
+
+def _review_blocks(text: Any, limit: int = 3000) -> List[Block]:
+    """The model's summary as paragraphs and bullets (its line structure is kept), cut at ``limit`` characters."""
+    text = str(text or "").strip()
+    cut = len(text) > limit
+    blocks: List[Block] = []
+    bullets: List[str] = []
+
+    def flush() -> None:
+        if bullets:
+            blocks.append(("bullets", list(bullets)))
+            bullets.clear()
+    for raw in text[:limit].splitlines():
+        line = raw.strip()
+        if not line:
+            flush()
+            continue
+        m = re.match(r"^[*\-]\s+(.*)$", line)
+        if m:
+            bullets.append(_plain(m.group(1)))
+        else:
+            flush()
+            blocks.append(("p", _plain(line)))
+    flush()
+    if cut:
+        blocks.append(("p", "(summary shortened)"))
+    return blocks or [("p", "(none)")]
 
 
 def _paper(record: Dict[str, Any]) -> Draft:
@@ -164,7 +223,7 @@ def _paper(record: Dict[str, Any]) -> Draft:
     review = (record.get("review") or {}).get("summary", "")
     intro: List[Block] = [("p", "Papers retrieved from the local index for this topic:"), *_evidence_blocks(record),
                           ("p", "Literature summary (written by the language model, not verified):"),
-                          ("quote", _short(review, 3000) or "(none)"),
+                          *_review_blocks(review),
                           ("p", "Hypothesis (written by the language model): " + str(hyp.get("statement"))),
                           ("p", "Rationale (model-written): " + str(hyp.get("rationale", "")))]
     if hyp.get("test_plan"):
@@ -209,6 +268,8 @@ def _failed_run(record: Dict[str, Any]) -> Draft:
     else:
         what += [("p", "Hypothesis (model-written): " + str(hyp.get("statement"))),
                  ("p", "Design: " + str(exp.get("design_summary") or "(not recorded)"))]
+        if _recomputed_mismatch(record):
+            what.append(("p", _recomputed_mismatch(record)))
     happened: List[Block] = [("p", execu.get("message") or FAILED_ADVICE.get(status, "The run did not finish."))]
     attempts = execu.get("attempts") or []
     for a in attempts:
