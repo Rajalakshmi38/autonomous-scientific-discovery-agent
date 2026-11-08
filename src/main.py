@@ -175,6 +175,18 @@ def cmd_draft(settings: Settings, args) -> int:
     return 0
 
 
+def cmd_dashboard(_settings: Settings, _args) -> int:
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        print("The dashboard needs Streamlit: pip install -r requirements-dashboard.txt")
+        return 1
+    import subprocess
+    app = Path(__file__).resolve().parent / "dashboard" / "app.py"
+    print("Starting the dashboard. Press Ctrl+C in this window to stop it.")
+    return subprocess.call([sys.executable, "-m", "streamlit", "run", str(app)], cwd=str(PROJECT_ROOT))
+
+
 def cmd_check_system(settings: Settings, _args) -> int:
     info = get_system_info()
     rec = recommend(info)
@@ -392,6 +404,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--describe", action="store_true", help="also ask the optional vision model to describe up to 3 figures")
     p.set_defaults(func=cmd_figures)
     sub.add_parser("memory", help="show what earlier runs the system remembers").set_defaults(func=cmd_memory)
+    p = sub.add_parser("dashboard", help="open the monitoring dashboard in the browser (needs Streamlit)")
+    p.set_defaults(func=cmd_dashboard)
     p = sub.add_parser("draft", help="write a draft (or a failed run report) from a saved run record")
     p.add_argument("--run", default=None, help="run record file (default: the newest run with a real model)")
     p.add_argument("--format", choices=["md", "tex", "both"], default="both")
