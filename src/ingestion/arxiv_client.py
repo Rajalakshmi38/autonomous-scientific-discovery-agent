@@ -190,6 +190,21 @@ class ArxivClient(PaperSource):
         logger.info("arXiv returned %d paper(s)", len(papers))
         return papers
 
+    def latest(self, category: str, max_results: int = 30) -> List[Paper]:
+        """The newest papers of a category (no keywords), newest first."""
+        if not _CATEGORY_RE.match(category or ""):
+            raise ValueError(f"Invalid arXiv category: {category!r} (example: cs.LG)")
+        if not 1 <= max_results <= MAX_RESULTS_PER_CALL:
+            raise ValueError(f"max_results must be between 1 and {MAX_RESULTS_PER_CALL}")
+        params = {"search_query": f"cat:{category}", "start": 0, "max_results": max_results,
+                  "sortBy": "submittedDate", "sortOrder": "descending"}
+        logger.info("Querying arXiv: %s", params["search_query"])
+        xml_text = self._fetch(params)
+        self._save_raw(xml_text)
+        papers = parse_arxiv_feed(xml_text)
+        logger.info("arXiv returned %d paper(s)", len(papers))
+        return papers
+
     def _save_raw(self, xml_text: str) -> None:
         if self.raw_dir is None:
             return
