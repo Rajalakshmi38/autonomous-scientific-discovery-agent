@@ -82,7 +82,11 @@ class WorkflowResult:
 
     def save(self, directory: Path) -> Path:
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"run_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        stem = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+        path, n = directory / f"{stem}.json", 1
+        while path.exists():                      # two runs in the same second must not overwrite each other
+            n += 1
+            path = directory / f"{stem}_{n}.json"
         path.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
         return path
 
