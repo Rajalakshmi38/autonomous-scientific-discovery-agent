@@ -187,6 +187,52 @@ def cmd_dashboard(_settings: Settings, _args) -> int:
     return subprocess.call([sys.executable, "-m", "streamlit", "run", str(app)], cwd=str(PROJECT_ROOT))
 
 
+def cmd_evaluate(settings: Settings, args) -> int:
+    from src.evaluation.holdout import evaluate_heldout, pick_heldout, summarize_ratings
+    if args.ratings:
+        print(summarize_ratings(Path(args.ratings)))
+        return 0
+    store = PaperStore(settings.papers_db_path)
+    try:
+        indexed = store.all()
+    finally:
+        store.close()
+    if not indexed:
+        print("The index is empty. Ingest papers first, so there is something to hold papers out from.")
+        return 1
+    client = ArxivClient(timeout=settings.arxiv_timeout_seconds, retries=settings.arxiv_retries,
+                         delay_seconds=settings.arxiv_delay_seconds, contact=settings.arxiv_contact, raw_dir=settings.raw_dir)
+    chosen, cutoff = pick_heldout(client.latest(args.category, max_results=args.pool), indexed, args.n)
+    print(f"Held-out papers must be newer than the newest indexed paper ({cutoff}) and not in the index.")
+    if not chosen:
+        print("No such paper was found. Try a larger --pool or another --category.")
+        return 0
+    for p in chosen:
+        print(f"  {p.uid}  {p.published[:10]}  {p.title[:80]}")
+    if len(chosen) < args.n:
+        print(f"Only {len(chosen)} of {args.n} requested papers were found.")
+    if args.dry_run:
+        print("Dry run: nothing was executed and nothing was added to the index.")
+        return 0
+    if not _llm_ready(settings):
+        return 1
+    import time
+    out_dir = settings.storage_dir / "evaluation" / f"holdout_{time.strftime('%Y%m%d_%H%M%S')}"
+    print(f"Running {len(chosen)} topic(s). Each takes several minutes. Docker Desktop and Ollama must stay running.")
+    store, retriever = build_retriever(settings)
+    try:
+        workflow = _make_workflow(settings, retriever, top_k=args.k, execute=True, use_memory=False)
+        outcome = evaluate_heldout(chosen, lambda topic: workflow.run(topic).save(settings.runs_dir),
+                                   get_embedder(settings).embed, out_dir, cutoff)
+    finally:
+        store.close()
+    s = outcome["summary"]
+    print(f"\nFinished {s['runs_finished']} of {s['papers']} run(s). Results are in {out_dir}")
+    print(f"  rating_sheet.csv  (fill in the 1 to 5 columns, then: python -m src.main evaluate --ratings FILE)")
+    print(f"  summary.md, results.json")
+    return 0
+
+
 def cmd_check_system(settings: Settings, _args) -> int:
     info = get_system_info()
     rec = recommend(info)
@@ -267,17 +313,47 @@ def cmd_reindex(settings: Settings, _args) -> int:
     return 0
 
 
-def cmd_run(settings: Settings, args) -> int:
-    if args.provider:
-        get_provider_spec(args.provider)   # validates the name
-        settings = dataclasses.replace(settings, llm_provider=args.provider)
+def _llm_ready(settings: Settings) -> bool:
+    """True when the chosen model can be used. Prints the reason when it cannot."""
     spec = get_provider_spec(settings.llm_provider)
     if spec.needs_local_server:
         status = check_ollama(settings.ollama_base_url, settings.ollama_model)
         if not status.ok:
             print(f"Cannot start: {status.message}", file=sys.stderr)
             print("Tip: run with --provider test to try the pipeline in clearly labelled mock mode.", file=sys.stderr)
-            return 1
+            return False
+    return True
+
+
+def _make_workflow(settings: Settings, retriever, *, top_k: int, execute: bool, use_memory: bool) -> ResearchWorkflow:
+    spec = get_provider_spec(settings.llm_provider)
+    llm = get_llm(settings)
+    free_ram = spec.needs_local_server and settings.unload_model_before_run
+    return ResearchWorkflow(
+        retriever=retriever,
+        reviewer=LiteratureReviewerAgent(llm, settings.citation_retries),
+        hypothesis_agent=HypothesisGeneratorAgent(
+            llm, settings.citation_retries, scope=EXPERIMENT_SCOPE if settings.code_mode == "spec" else ""),
+        executor=CodeExecutorAgent(llm, mode=settings.code_mode, spec_retries=settings.spec_retries),
+        memory=MemoryStore(settings.storage_dir / "memory.jsonl") if use_memory else None,
+        memory_budget=settings.memory_char_budget,
+        figures_dir=settings.data_dir / "figures",
+        before_execute=(lambda: unload_model(settings.ollama_base_url, settings.ollama_model)) if free_ram else None,
+        llm_mode=describe_llm(settings),
+        top_k=top_k,
+        sandbox=make_sandbox(settings) if execute else None,
+        max_repairs=settings.max_repair_retries,
+        char_budget=settings.context_char_budget,
+        critic_alpha=settings.critic_alpha,
+    )
+
+
+def cmd_run(settings: Settings, args) -> int:
+    if args.provider:
+        get_provider_spec(args.provider)   # validates the name
+        settings = dataclasses.replace(settings, llm_provider=args.provider)
+    if not _llm_ready(settings):
+        return 1
     if settings.is_test_mode:
         print("=" * 72)
         print("TEST MODE: the LLM is a rule-based mock. Output below is NOT genuine reasoning.")
@@ -285,27 +361,8 @@ def cmd_run(settings: Settings, args) -> int:
         print("=" * 72)
     store, retriever = build_retriever(settings)
     try:
-        llm = get_llm(settings)
-        sandbox = None if args.no_execute else make_sandbox(settings)
         use_memory = not args.no_memory and settings.memory_char_budget > 0
-        free_ram = spec.needs_local_server and settings.unload_model_before_run
-        workflow = ResearchWorkflow(
-            retriever=retriever,
-            reviewer=LiteratureReviewerAgent(llm, settings.citation_retries),
-            hypothesis_agent=HypothesisGeneratorAgent(
-                llm, settings.citation_retries, scope=EXPERIMENT_SCOPE if settings.code_mode == "spec" else ""),
-            executor=CodeExecutorAgent(llm, mode=settings.code_mode, spec_retries=settings.spec_retries),
-            memory=MemoryStore(settings.storage_dir / "memory.jsonl") if use_memory else None,
-            memory_budget=settings.memory_char_budget,
-            figures_dir=settings.data_dir / "figures",
-            before_execute=(lambda: unload_model(settings.ollama_base_url, settings.ollama_model)) if free_ram else None,
-            llm_mode=describe_llm(settings),
-            top_k=args.k,
-            sandbox=sandbox,
-            max_repairs=settings.max_repair_retries,
-            char_budget=settings.context_char_budget,
-            critic_alpha=settings.critic_alpha,
-        )
+        workflow = _make_workflow(settings, retriever, top_k=args.k, execute=not args.no_execute, use_memory=use_memory)
         result = workflow.run(args.topic)
     finally:
         store.close()
@@ -404,6 +461,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--describe", action="store_true", help="also ask the optional vision model to describe up to 3 figures")
     p.set_defaults(func=cmd_figures)
     sub.add_parser("memory", help="show what earlier runs the system remembers").set_defaults(func=cmd_memory)
+    p = sub.add_parser("evaluate", help="run the agent on recent papers it has not seen and write a rating sheet")
+    p.add_argument("--category", default="cs.LG")
+    p.add_argument("--n", type=int, default=5, help="number of held-out papers")
+    p.add_argument("--pool", type=int, default=30, help="how many newest papers to look through")
+    p.add_argument("-k", type=int, default=3, help="papers retrieved per run")
+    p.add_argument("--dry-run", action="store_true", help="only list the chosen papers")
+    p.add_argument("--ratings", default=None, help="summarize a filled-in rating sheet and exit")
+    p.set_defaults(func=cmd_evaluate)
+
     p = sub.add_parser("dashboard", help="open the monitoring dashboard in the browser (needs Streamlit)")
     p.set_defaults(func=cmd_dashboard)
     p = sub.add_parser("draft", help="write a draft (or a failed run report) from a saved run record")
