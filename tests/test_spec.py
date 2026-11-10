@@ -385,3 +385,19 @@ def test_the_agent_warns_when_the_models_valid_design_does_not_fit_the_hypothesi
                             treatment={"model": "logistic_regression", "params": {}, "scale": True}))
     plan = CodeExecutorAgent(FakeListChatModel(responses=[reply]), mode="spec").prepare_experiment(hyp)
     assert plan.source == "model_spec" and "Possible mismatch" in plan.note and "random_forest" in plan.note
+
+
+# ------------------------------------------------------------------ the hypothesis prompt must match what the sandbox allows
+def test_the_hypothesis_scope_lists_the_real_allowed_values_and_does_not_push_one_method():
+    from src.agents.hypothesis_generator import EXPERIMENT_SCOPE
+    from src.experiments.spec import MODEL_OPTIONS
+    trees = MODEL_OPTIONS["random_forest"]["n_estimators"]
+    ks = MODEL_OPTIONS["knn"]["n_neighbors"]
+    assert "number of trees " + ", ".join(str(x) for x in trees[:-1]) + " or " + str(trees[-1]) in EXPERIMENT_SCOPE
+    assert "k of " + ", ".join(str(x) for x in ks[:-1]) + " or " + str(ks[-1]) in EXPERIMENT_SCOPE
+    for dataset in ("iris", "wine", "breast_cancer", "digits"):
+        assert dataset in EXPERIMENT_SCOPE
+    assert "do not default to random forests" in EXPERIMENT_SCOPE
+    assert "100 trees scores higher than one with 10 trees" not in EXPERIMENT_SCOPE       # a single example gets copied
+    assert EXPERIMENT_SCOPE.count("scores higher") >= 3 and "k-nearest neighbors with k=11" in EXPERIMENT_SCOPE
+    assert "do not claim" in EXPERIMENT_SCOPE and "predicts anything else" in EXPERIMENT_SCOPE
