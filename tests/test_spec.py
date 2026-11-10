@@ -401,3 +401,47 @@ def test_the_hypothesis_scope_lists_the_real_allowed_values_and_does_not_push_on
     assert "100 trees scores higher than one with 10 trees" not in EXPERIMENT_SCOPE       # a single example gets copied
     assert EXPERIMENT_SCOPE.count("scores higher") >= 3 and "k-nearest neighbors with k=11" in EXPERIMENT_SCOPE
     assert "do not claim" in EXPERIMENT_SCOPE and "predicts anything else" in EXPERIMENT_SCOPE
+
+
+# ------------------------------------------------------------------ found in the second holdout evaluation
+SVM_FORM = {"dataset": "breast_cancer", "metric": "f1_macro", "n_resamples": 20,
+            "baseline": {"model": "svm", "params": {"kernel": "rbf", "scale": False}},
+            "treatment": {"model": "svm", "params": {"kernel": "linear", "scale": True}}}
+
+
+def test_a_scaling_flag_written_inside_params_is_moved_to_the_scale_setting():
+    raw = {"dataset": "iris", "baseline": {"model": "svm", "params": {"scale": False}},
+           "treatment": {"model": "svm", "params": {"scale": True}}}
+    spec, notes = validate_spec_tolerant(raw)
+    assert spec.baseline.scale is False and spec.treatment.scale is True
+    assert spec.treatment.params == {} and any("moved to treatment.scale" in n for n in notes)
+    assert not any("ignored" in n for n in notes)
+
+
+def test_an_explicit_scale_setting_wins_over_a_flag_inside_params():
+    raw = {"dataset": "iris", "baseline": {"model": "svm", "scale": False, "params": {"scale": True}},
+           "treatment": {"model": "svm", "scale": True}}
+    spec, notes = validate_spec_tolerant(raw)
+    assert spec.baseline.scale is False and any("baseline.params.scale ignored" in n for n in notes)
+
+
+def test_a_design_that_changes_the_kernel_and_scaling_together_falls_back_to_the_hypothesis():
+    """The real case: the model changed the kernel AND scaling. The one-thing rule refuses it, and the fallback reads
+    the hypothesis sentence, which is about scaling."""
+    hyp = Hypothesis("A feature-scaled SVM scores higher macro-F1 than an SVM without feature scaling on the breast_cancer dataset.",
+                     "r", "plan", "raw")
+    reply = json.dumps(SVM_FORM)
+    plan = CodeExecutorAgent(FakeListChatModel(responses=[reply] * 4), mode="spec", spec_retries=2).prepare_experiment(hyp)
+    assert plan.source == "keyword_spec"
+    spec = plan.spec
+    assert spec["baseline"]["model"] == spec["treatment"]["model"] == "svm"
+    assert spec["baseline"]["scale"] is False and spec["treatment"]["scale"] is True
+    assert spec["baseline"]["params"] == spec["treatment"]["params"]
+
+
+def test_mismatch_note_when_the_hypothesis_is_about_scaling_but_the_arms_do_not_differ_in_scaling():
+    design = _design({"model": "svm", "params": {"kernel": "rbf"}}, {"model": "svm", "params": {"kernel": "linear"}})
+    note = design_mismatch_note(design, "A feature-scaled SVM scores higher macro-F1 than an SVM without feature scaling.")
+    assert "about feature scaling" in note and "do not differ in scaling" in note
+    fitting = _design({"model": "svm"}, {"model": "svm", "scale": True})
+    assert design_mismatch_note(fitting, "A feature-scaled SVM scores higher macro-F1 than an SVM without feature scaling.") == ""
