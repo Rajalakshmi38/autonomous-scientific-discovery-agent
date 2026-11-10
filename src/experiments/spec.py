@@ -243,6 +243,14 @@ def normalise_raw(raw: Any) -> Tuple[Any, List[str]]:
                 item["model"] = found
         options = MODEL_OPTIONS.get(item.get("model"), None)
         params = item.get("params") if isinstance(item.get("params"), dict) else {}
+        for alias in ("scale", "scaling", "standardize", "standardise"):      # a scaling flag written inside params
+            if alias in params and (options is None or alias not in options):
+                if "scale" not in item and isinstance(params[alias], (bool, int, str)):
+                    item["scale"] = params[alias]
+                    notes.append(f"{side}.params.{alias} moved to {side}.scale")
+                else:
+                    notes.append(f"{side}.params.{alias} ignored (feature scaling is set with {side}.scale)")
+                params = {k: v for k, v in params.items() if k != alias}
         cleaned: Dict[str, Any] = {}
         for key, value in params.items():
             target = key if (options is not None and key in options) else _PARAM_WORDS.get(str(key).lower(), key)
@@ -366,8 +374,11 @@ def design_mismatch_note(spec: "ExperimentSpec", statement: str) -> str:
     else:
         notes.append("the hypothesis names none of the methods the experiment can run (" + ", ".join(sorted(_TEXT_MODELS))
                      + "), so the experiment is only a stand-in for the topic")
-    if spec.baseline.scale != spec.treatment.scale and not _SCALING_WORDS.search(clean):
+    arms_differ_in_scaling = spec.baseline.scale != spec.treatment.scale
+    if arms_differ_in_scaling and not _SCALING_WORDS.search(clean):
         notes.append("the experiment compares feature scaling, but the hypothesis does not mention scaling")
+    if _SCALING_WORDS.search(clean) and not arms_differ_in_scaling:
+        notes.append("the hypothesis is about feature scaling, but the two arms of the experiment do not differ in scaling")
     return ("Possible mismatch with the hypothesis: " + "; ".join(notes) + ".") if notes else ""
 
 
