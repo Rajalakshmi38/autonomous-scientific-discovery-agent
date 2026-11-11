@@ -231,3 +231,33 @@ def test_find_captions_drops_a_page_number_under_the_caption():
 
 def test_find_captions_keeps_a_number_that_ends_the_sentence():
     assert find_captions("Figure 6: Loss after epoch 50\n") == [("Figure 6", "Loss after epoch 50")]
+
+
+class _Reply:
+    def __init__(self, text):
+        self.status_code, self._text = 200, text
+
+    def json(self):
+        return {"message": {"content": self._text}}
+
+
+class _Session:
+    def __init__(self, *texts):
+        self.texts, self.sent = list(texts), []
+
+    def post(self, url, timeout=None, json=None):
+        self.sent.append(json["messages"][0]["content"])
+        return _Reply(self.texts.pop(0))
+
+
+def test_an_empty_vision_answer_is_retried_once_with_a_short_prompt(pdf_file, tmp_path):
+    image = extract_figures(pdf_file, tmp_path / "o")[0].image_path
+    session = _Session("", "A page with a chart.")
+    assert describe_figure(image, "Accuracy of A and B.", "http://x", "tiny", session=session) == "A page with a chart."
+    assert "Caption:" in session.sent[0] and "Caption:" not in session.sent[1]
+
+
+def test_two_empty_vision_answers_are_reported_not_silently_accepted(pdf_file, tmp_path):
+    image = extract_figures(pdf_file, tmp_path / "o")[0].image_path
+    with pytest.raises(FigureError, match="empty answer"):
+        describe_figure(image, "c", "http://x", "tiny", session=_Session("", "  "))
