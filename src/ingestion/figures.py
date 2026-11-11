@@ -156,6 +156,9 @@ def load_manifest(directory: Path) -> List[FigureInfo]:
         return []
 
 
+SHORT_VISION_PROMPT = "Describe this image in two or three sentences. Say only what you can see."
+
+
 def describe_figure(image_path: Path, caption: str, base_url: str, model: str, timeout: float = 300.0,
                     session: Optional[requests.Session] = None) -> str:
     """Ask a local vision model (through Ollama) to describe a page image. The answer is UNVERIFIED."""
@@ -163,18 +166,28 @@ def describe_figure(image_path: Path, caption: str, base_url: str, model: str, t
         raise FigureError("No vision model is configured. Set FIGURE_VLM_MODEL in .env.")
     http = session or requests
     image_b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-    prompt = ("This is a page from a research paper. Describe the figure whose caption is given, in two or three "
-              "sentences. Say only what you can see. If you cannot tell, say so. Do not invent numbers.\n"
-              f"Caption: {caption}")
-    try:
-        resp = http.post(f"{base_url.rstrip('/')}/api/chat", timeout=timeout, json={
-            "model": model, "stream": False,
-            "messages": [{"role": "user", "content": prompt, "images": [image_b64]}]})
-    except requests.RequestException as exc:
-        raise FigureError(f"Could not reach Ollama for the vision model: {exc}") from exc
-    if resp.status_code != 200:
-        raise FigureError(f"Ollama answered HTTP {resp.status_code}. Is '{model}' a vision model that you have pulled?")
-    try:
-        return str(resp.json()["message"]["content"]).strip()
-    except (KeyError, ValueError) as exc:
-        raise FigureError("Ollama returned an unexpected reply for the vision model.") from exc
+    full_prompt = ("This is a page from a research paper. Describe the figure whose caption is given, in two or three "
+                   "sentences. Say only what you can see. If you cannot tell, say so. Do not invent numbers.\n"
+                   f"Caption: {caption}")
+
+    def ask(prompt: str) -> str:
+        try:
+            resp = http.post(f"{base_url.rstrip('/')}/api/chat", timeout=timeout, json={
+                "model": model, "stream": False,
+                "messages": [{"role": "user", "content": prompt, "images": [image_b64]}]})
+        except requests.RequestException as exc:
+            raise FigureError(f"Could not reach Ollama for the vision model: {exc}") from exc
+        if resp.status_code != 200:
+            raise FigureError(f"Ollama answered HTTP {resp.status_code}. Is '{model}' a vision model that you have pulled?")
+        try:
+            return str(resp.json()["message"]["content"]).strip()
+        except (KeyError, ValueError) as exc:
+            raise FigureError("Ollama returned an unexpected reply for the vision model.") from exc
+
+    text = ask(full_prompt)
+    if not text:        # some small vision models return nothing for a long instruction: try a short one once
+        text = ask(SHORT_VISION_PROMPT)
+    if not text:
+        raise FigureError(f"The vision model '{model}' returned an empty answer, even for a short prompt. "
+                          "Try a different vision model.")
+    return text
