@@ -17,6 +17,7 @@ This project is a work in progress. The limits and what is not built yet are lis
 7. A statistical critic checks the numbers: it reports the difference, a confidence interval and a p-value, and says when the result is inconclusive.
 8. Every run is saved as a record with the sources, design, code, output and warnings. A short note about earlier runs on similar topics is shown to the model in later runs.
 9. Optionally, captions and page images of figures can be taken from a paper's PDF and added to the evidence.
+10. The `draft` command turns one saved run into a short draft (Markdown and LaTeX). If the run failed, it writes a failed run report instead.
 
 ## How it works
 
@@ -50,7 +51,7 @@ pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 ```
 
-Download a language model that fits your PC. The project was tested with `llama3.2:3b` on a laptop with 8 GB of RAM and no GPU. A smaller `llama3.2:1b` also exists.
+Download a language model that fits your PC. `llama3.2:3b` is a good small choice; `llama3.2:1b` needs less memory.
 
 ```powershell
 ollama pull llama3.2:3b
@@ -79,6 +80,7 @@ On a low-memory PC you can limit Docker's memory by creating the file `.wslconfi
 
 ```powershell
 python -m src.main ingest --query "random forest" --max-results 30 --category cs.LG
+python -m src.main ingest --source pubmed --query "asthma lung sounds" --max-results 20
 python -m src.main run --topic "random forest number of trees" -k 3
 ```
 
@@ -91,12 +93,28 @@ Other commands:
 - `figures --paper arxiv:ID` extracts figure captions and page images from a stored paper (use `--describe` only if you set up a vision model).
 - `memory` shows what earlier runs the system remembers.
 - `summary` counts the saved runs: results, citations and critic verdicts.
+- `draft` writes a draft from the newest run with a real model (or `--run FILE`) into `storage/drafts/`, as `.md` and `.tex` (`--format md` or `tex` for one). The draft is filled from the saved record without a language model: the critic's lines are copied unchanged, model-written text is labelled, and a run with no verified result gets a failed run report instead of a paper.
 - `sandbox-status` and `sandbox-test` check the sandbox.
+- `dashboard` opens a read-only monitoring page in the browser (needs `pip install -r requirements-dashboard.txt`). It shows each saved run's steps, the literature citations and the time and attempts it used.
+- `evaluate` takes recent arXiv papers that are not in the index, runs the agent on their titles, and writes a rating sheet (`storage/evaluation/`) for a person to score. `evaluate --dry-run` only lists the papers, and `evaluate --ratings FILE` summarizes a filled-in sheet.
 - `status` shows the model, stored papers and sandbox state.
 - `reindex` rebuilds the search index after changing the embedding setting.
 - `check-system` and `check-llm` check your hardware and the Ollama connection.
 
 Each run is saved as a JSON file in `storage/runs/`. Logs are in `storage/logs/app.log`.
+
+## Keeping the index up to date
+
+Save the searches you want to repeat, then run `update` whenever you like. It stores and indexes only papers that are new.
+
+```powershell
+python -m src.main watch add --source arxiv --query "random forest" --category cs.LG
+python -m src.main watch add --source pubmed --query "asthma lung sounds"
+python -m src.main watch list
+python -m src.main update
+```
+
+`watch remove NUMBER` deletes a saved search. To refresh regularly, schedule `update` with Windows Task Scheduler (program: the `python.exe` inside `.venv\Scripts`, arguments: `-m src.main update`, start in: the project folder). `ARXIV_CONTACT` is also sent to PubMed as the contact email.
 
 ## Main settings
 
@@ -147,10 +165,13 @@ src/agents/               literature reviewer, hypothesis generator, code execut
 src/experiments/          the checked experiment form and the script template
 src/critic/               statistical critic
 src/memory/               note about earlier runs
-src/ingestion/            arXiv client, paper storage, figure extraction
+src/ingestion/            arXiv and PubMed clients, saved searches, paper storage, figure extraction
 src/retrieval/            embeddings, vector index, search, citation checks
 src/llm/                  model selection, mock model, Ollama check
 src/execution/            Docker sandbox, repair loop, sandbox self-test
+src/draft/                draft and failed run report from a saved run
+src/dashboard/            monitoring dashboard (Streamlit)
+src/evaluation/           holdout evaluation
 src/utils/                logging, hardware check, run summary
 sandbox/Dockerfile        the sandbox image
 tests/                    automatic tests
@@ -158,23 +179,20 @@ tests/                    automatic tests
 
 ## Limitations
 
-- Output quality depends on the model. Small local models often write code that fails or describe papers inaccurately. Treat summaries and hypotheses as drafts that need human review.
-- Experiment numbers are real outputs of model-written code. They are not verified research findings.
-- Without a settings file the search matches shared words, not meaning. Semantic search is better but still weak when few stored papers cover a topic.
-- The experiments use four small bundled datasets and six simple methods. A hypothesis about anything else, such as a new algorithm or real satellite data, can only be tested through a stand-in comparison. The program warns when the design seems not to match the hypothesis, but that check is simple and can miss a mismatch.
-- A 3B model often writes a form that changes more than one thing, so the fixed keyword rules often build the design. The hypothesis wording can also be wrong, for example calling two fixed settings "fixed versus variable".
-- So far the real runs on iris have all been inconclusive. A result on a toy dataset describes that dataset only.
-- There is no reinforcement learning. The repair loop only shows the model an error and asks for new code, and in real use with a 3B model it has not yet fixed a failing script. Memory only shows earlier results as context. Nothing is trained.
-- The optional vision model for figures has not been tested on this hardware. Figure captions are found only when they start a line with `Figure N:` or `Fig. N.`, and tables are not extracted.
-- Only arXiv works. PubMed is a placeholder.
+- Output quality depends on the language model. Small local models can describe papers inaccurately, so summaries and hypotheses are drafts that need human review.
+- Experiments use a few small bundled datasets and simple methods. Their results describe those datasets only and are not verified research findings.
+- Search quality depends on which papers are stored. Semantic search (Ollama embeddings) works better than the default word matching.
+- The repair loop sends errors back to the model, but it is a plain retry loop, not reinforcement learning. A reinforcement-learning component is only a proposal.
+- Figure extraction reads captions and page images. A vision-language model for describing figures is optional and not part of the default setup.
+- The holdout evaluation uses only a handful of papers and rough measures such as embedding similarity. Human ratings are needed to judge the output, so it is a check and not a benchmark.
+- The dashboard shows runs once they are saved. It does not follow a run step by step while it is still running.
+- The draft is a short template filled from one saved run. It is not a finished research paper.
+- The index is refreshed when `update` is run. Nothing runs in the background, so regular refreshes need a scheduled task (see "Keeping the index up to date").
+- PubMed records follow NCBI's documented format. Records without an abstract are skipped, and PubMed has no category option.
 
 ## Not built yet
 
-- Research draft generation from verified results
-- Evaluation on held-out cases
-- A monitoring dashboard
 - A reinforcement-learning component
-- PubMed ingestion
 
 ## Troubleshooting
 
