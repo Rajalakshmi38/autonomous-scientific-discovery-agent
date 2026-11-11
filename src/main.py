@@ -29,6 +29,7 @@ from src.ingestion.arxiv_client import ArxivClient
 from src.ingestion.base import IngestionError
 from src.ingestion.figures import FigureError, describe_figure, download_pdf, extract_figures, paper_dir, save_manifest
 from src.ingestion.paper_store import PaperStore
+from src.ingestion.pubmed_client import PubMedClient
 from src.llm.factory import available_providers, describe_llm, get_llm, get_provider_spec
 from src.llm.ollama_check import check_ollama, unload_model
 from src.memory.store import MemoryStore
@@ -262,17 +263,28 @@ def cmd_check_llm(settings: Settings, _args) -> int:
     return 0
 
 
+def _make_source(settings: Settings, name: str):
+    if name == "pubmed":
+        return PubMedClient(timeout=settings.arxiv_timeout_seconds, retries=settings.arxiv_retries,
+                            contact=settings.arxiv_contact)
+    return ArxivClient(timeout=settings.arxiv_timeout_seconds, retries=settings.arxiv_retries,
+                       delay_seconds=settings.arxiv_delay_seconds, contact=settings.arxiv_contact, raw_dir=settings.raw_dir)
+
+
+def _search_source(client, entry_source: str, query: str, max_results: int, category: Optional[str]):
+    if entry_source == "arxiv":
+        return client.search(query, max_results=max_results, category=category)
+    return client.search(query, max_results=max_results)
+
+
 def cmd_ingest(settings: Settings, args) -> int:
-    client = ArxivClient(
-        timeout=settings.arxiv_timeout_seconds,
-        retries=settings.arxiv_retries,
-        delay_seconds=settings.arxiv_delay_seconds,
-        contact=settings.arxiv_contact,
-        raw_dir=settings.raw_dir,
-    )
-    papers = client.search(args.query, max_results=args.max_results, category=args.category)
+    if args.source == "pubmed" and args.category:
+        print("--category only works with the arxiv source.")
+        return 1
+    client = _make_source(settings, args.source)
+    papers = _search_source(client, args.source, args.query, args.max_results, args.category)
     if not papers:
-        print("arXiv returned no papers for this query. Try different or fewer keywords.")
+        print(f"{args.source} returned no papers for this query. Try different or fewer keywords.")
         return 0
     store, retriever = build_retriever(settings)
     try:
@@ -284,6 +296,58 @@ def cmd_ingest(settings: Settings, args) -> int:
     for p in papers:
         print(f"  [{p.uid}] {p.title[:90]} ({p.year})")
     return 0
+
+
+def cmd_watch(settings: Settings, args) -> int:
+    from src.ingestion import watchlist
+    path = settings.storage_dir / "watchlist.json"
+    try:
+        if args.watch_command == "add":
+            entry = watchlist.WatchEntry(args.source, args.query, args.max_results, args.category)
+            print("Added." if watchlist.add(path, entry) else "That search is already on the list.")
+        elif args.watch_command == "remove":
+            print(f"Removed: {watchlist.remove(path, args.number).describe()}")
+        else:
+            entries = watchlist.load(path)
+            print("The watch list is empty. Add a search with: python -m src.main watch add --query \"...\"" if not entries
+                  else "\n".join(f"{i}. {e.describe()}" for i, e in enumerate(entries, 1)))
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+    return 0
+
+
+def cmd_update(settings: Settings, _args) -> int:
+    """Re-run every saved search and store + index only the papers that are new."""
+    from src.ingestion import watchlist
+    try:
+        entries = watchlist.load(settings.storage_dir / "watchlist.json")
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+    if not entries:
+        print("The watch list is empty. Add a search with: python -m src.main watch add --query \"...\"")
+        return 0
+    store, retriever = build_retriever(settings)
+    failed, total_new = 0, 0
+    try:
+        for entry in entries:
+            try:
+                found = _search_source(_make_source(settings, entry.source), entry.source, entry.query, entry.max_results, entry.category)
+            except (IngestionError, ValueError) as exc:
+                failed += 1
+                print(f"FAILED  {entry.describe()}: {exc}")
+                continue
+            new = [p for p in found if store.get(p.uid) is None]
+            if new:
+                store.upsert_many(new)
+                retriever.index_papers(new)
+            total_new += len(new)
+            print(f"{len(new):3d} new of {len(found):3d} found  {entry.describe()}")
+    finally:
+        store.close()
+    print(f"Update finished: {total_new} new paper(s), {failed} search(es) failed.")
+    return 1 if failed else 0
 
 
 def cmd_search(settings: Settings, args) -> int:
@@ -431,11 +495,27 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="show configuration and index size").set_defaults(func=cmd_status)
 
-    p = sub.add_parser("ingest", help="fetch papers from arXiv, store and index them")
+    p = sub.add_parser("ingest", help="fetch papers from arXiv or PubMed, store and index them")
+    p.add_argument("--source", choices=["arxiv", "pubmed"], default="arxiv")
     p.add_argument("--query", required=True)
     p.add_argument("--max-results", type=int, default=10)
-    p.add_argument("--category", default=None, help="e.g. cs.LG")
+    p.add_argument("--category", default=None, help="arXiv only, e.g. cs.LG")
     p.set_defaults(func=cmd_ingest)
+
+    p = sub.add_parser("watch", help="manage the saved searches that `update` re-runs")
+    wsub = p.add_subparsers(dest="watch_command", required=True)
+    w = wsub.add_parser("add", help="save a search")
+    w.add_argument("--source", choices=["arxiv", "pubmed"], default="arxiv")
+    w.add_argument("--query", required=True)
+    w.add_argument("--max-results", type=int, default=20)
+    w.add_argument("--category", default=None, help="arXiv only, e.g. cs.LG")
+    wsub.add_parser("list", help="show the saved searches")
+    w = wsub.add_parser("remove", help="delete a saved search by its number")
+    w.add_argument("number", type=int)
+    p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("update", help="re-run the saved searches and add new papers to the index")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("search", help="search the local index")
     p.add_argument("--query", required=True)
