@@ -38,6 +38,10 @@ class Settings:
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"   # sentence-transformers backend
     ollama_embedding_model: str = "nomic-embed-text"                  # ollama backend
     retrieval_min_score: float = 0.0
+    retrieval_published_only: bool = False   # only use papers that count as published (see publication_status)
+    vector_backend: str = "local"       # "local" (NumPy index) or "milvus"
+    milvus_uri: str = ""                 # a Milvus server such as http://localhost:19530, or a local file (Linux/macOS)
+    bandit_epsilon: float = 0.2          # share of `run --adaptive` runs that try a random strategy
 
     arxiv_contact: str = ""
     arxiv_timeout_seconds: float = 30.0
@@ -127,6 +131,16 @@ def load_settings(
             f"EMBEDDING_BACKEND={backend!r} is not supported. Choose from {sorted(VALID_EMBEDDING_BACKENDS)}."
         )
 
+    vector_backend = env.get("VECTOR_BACKEND", "local").strip().lower()
+    if vector_backend not in ("local", "milvus"):
+        raise ConfigError(f"VECTOR_BACKEND={vector_backend!r} is not supported. Choose local or milvus.")
+    milvus_uri = env.get("MILVUS_URI", "").strip()
+    if vector_backend == "milvus" and not milvus_uri:
+        raise ConfigError("VECTOR_BACKEND=milvus needs MILVUS_URI, for example http://localhost:19530")
+    bandit_epsilon = _num(env, "BANDIT_EPSILON", 0.2, float)
+    if not 0.0 <= bandit_epsilon <= 1.0:
+        raise ConfigError("BANDIT_EPSILON must be between 0 and 1")
+
     retries = _num(env, "ARXIV_RETRIES", 3, int)
     if retries < 1:
         raise ConfigError("ARXIV_RETRIES must be >= 1")
@@ -193,6 +207,10 @@ def load_settings(
         embedding_model=env.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
         ollama_embedding_model=env.get("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"),
         retrieval_min_score=_num(env, "RETRIEVAL_MIN_SCORE", 0.0, float),
+        retrieval_published_only=env.get("RETRIEVAL_PUBLISHED_ONLY", "false").strip().lower() in ("1", "true", "yes"),
+        vector_backend=vector_backend,
+        milvus_uri=milvus_uri,
+        bandit_epsilon=bandit_epsilon,
         arxiv_contact=env.get("ARXIV_CONTACT", "").strip(),
         arxiv_timeout_seconds=_num(env, "ARXIV_TIMEOUT_SECONDS", 30.0, float),
         arxiv_retries=retries,
