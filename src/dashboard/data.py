@@ -142,6 +142,7 @@ def citations(record: Dict[str, Any]) -> Dict[str, Any]:
     by_review = set(_grounding(record, "review_grounding").get("cited_ids") or [])
     by_hyp = set(_grounding(record, "hypothesis_grounding").get("cited_ids") or [])
     rows = [{"id": e.get("id"), "title": e.get("title"), "similarity": e.get("score"),
+             "status": e.get("status", "not recorded"),
              "cited by review": e.get("id") in by_review, "cited by hypothesis": e.get("id") in by_hyp,
              "link": e.get("url")} for e in record.get("evidence") or []]
     unknown = sorted(set(_grounding(record, "review_grounding").get("unknown_ids") or [])

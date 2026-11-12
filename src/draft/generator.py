@@ -104,7 +104,8 @@ def _evidence_blocks(record: Dict[str, Any]) -> List[Block]:
     lines = []
     for e in record.get("evidence") or []:
         mark = " (cited by the hypothesis)" if e.get("id") in cited else ""
-        lines.append(f"[{e.get('id')}] {e.get('title')} (similarity {e.get('score')}){mark} {e.get('url', '')}".strip())
+        status = f" ({e['status']})" if e.get("status") else ""
+        lines.append(f"[{e.get('id')}] {e.get('title')}{status} (similarity {e.get('score')}){mark} {e.get('url', '')}".strip())
     return [("bullets", lines)] if lines else [("p", "No papers were retrieved.")]
 
 
@@ -249,7 +250,8 @@ def _paper(record: Dict[str, Any]) -> Draft:
             results.append(("p", f"{comp.get('name')}: mean of {names[0]} = {res.get('mean_a'):.4f}; "
                                  f"mean of {names[-1]} = {res.get('mean_b'):.4f}; n = {res.get('n_a')} and {res.get('n_b')}."))
     results.append(("p", _interpretation(verdict)))
-    refs = [f"[{e.get('id')}] {e.get('title')}. {e.get('url', '')}".strip() for e in record.get("evidence") or []]
+    refs = [f"[{e.get('id')}] {e.get('title')}" + (f" ({e['status']})" if e.get("status") else "") + f". {e.get('url', '')}".rstrip()
+            for e in record.get("evidence") or []]
     return Draft("paper", f"Draft report: {record.get('topic')}", _banners(record, "paper"), abstract, [
         ("Introduction", intro), ("Method", method), ("Results", results),
         ("Limitations", _limitations(record)), ("References", [("bullets", refs or ["(none)"])])])
