@@ -44,6 +44,14 @@ class Paper:
         return cls(**data)
 
 
+def publication_status(paper: "Paper") -> str:
+    """"published" or "preprint". This is a PROXY for peer review, not proof of it: a PubMed record, or an arXiv paper
+    whose authors give a journal reference or DOI, counts as published. Everything else is a preprint."""
+    if paper.source == "pubmed" or paper.journal_ref or paper.doi:
+        return "published"
+    return "preprint"
+
+
 @dataclass
 class RetrievedPaper:
     paper: Paper

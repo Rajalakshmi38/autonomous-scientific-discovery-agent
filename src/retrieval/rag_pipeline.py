@@ -17,7 +17,7 @@ from typing import List, Optional
 
 from src.agents.base import extract_citations, format_evidence
 from src.ingestion.figures import load_manifest, paper_dir
-from src.models import RetrievedPaper
+from src.models import RetrievedPaper, publication_status
 from src.retrieval.retriever import PaperRetriever
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ class Source:
     url: str
     year: str = ""
     score: float = 0.0
+    status: str = ""          # "published" or "preprint"
 
 
 @dataclass
@@ -65,7 +66,8 @@ def _words(text: str) -> set:
 
 class RagPipeline:
     def __init__(self, retriever: PaperRetriever, char_budget: int = 6000, max_abstract_chars: int = 1200,
-                 figures_dir: Optional[Path] = None) -> None:
+                 figures_dir: Optional[Path] = None, published_only: bool = False) -> None:
+        self.published_only = published_only
         self.figures_dir = Path(figures_dir) if figures_dir else None
         self.retriever = retriever
         self.char_budget = char_budget
@@ -73,7 +75,7 @@ class RagPipeline:
 
     def prepare(self, topic: str, k: int = 5) -> RagContext:
         """Retrieve up to ``k`` papers, then keep the best-ranked ones that fit the character budget."""
-        retrieved = self.retriever.retrieve(topic, k=k)
+        retrieved = self.retriever.retrieve(topic, k=k, published_only=self.published_only)
         if self.figures_dir is not None:                    # captions of figures extracted earlier (`figures` command)
             for item in retrieved:
                 figs = load_manifest(paper_dir(self.figures_dir, item.paper.uid))
@@ -89,7 +91,8 @@ class RagPipeline:
         dropped = len(retrieved) - len(kept)
         if dropped:
             logger.info("Dropped %d lower-ranked paper(s) to fit the prompt budget", dropped)
-        sources = [Source(i.paper.uid, i.paper.title, i.paper.url, i.paper.year, round(i.score, 4)) for i in kept]
+        sources = [Source(i.paper.uid, i.paper.title, i.paper.url, i.paper.year, round(i.score, 4), publication_status(i.paper))
+                   for i in kept]
         return RagContext(topic=topic, evidence=kept, sources=sources, dropped=dropped)
 
     def check(self, text: str, context: RagContext) -> GroundingReport:

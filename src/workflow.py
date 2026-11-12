@@ -22,7 +22,7 @@ from src.agents.literature_reviewer import LiteratureReview, LiteratureReviewerA
 from src.critic.critic import CriticReport, StatisticalCritic
 from src.execution.feedback_loop import ExecutionOutcome, run_with_repair
 from src.execution.sandbox import Status
-from src.models import RetrievedPaper
+from src.models import RetrievedPaper, publication_status
 from src.retrieval.rag_pipeline import GroundingReport, RagPipeline, Source
 from src.retrieval.retriever import PaperRetriever
 
@@ -65,7 +65,8 @@ class WorkflowResult:
             "status": self.status,
             "execution_status": self.execution_status,
             "evidence": [
-                {"id": e.paper.uid, "title": e.paper.title, "url": e.paper.url, "score": round(e.score, 4)}
+                {"id": e.paper.uid, "title": e.paper.title, "url": e.paper.url, "score": round(e.score, 4),
+                 "status": publication_status(e.paper)}
                 for e in self.evidence
             ],
             "sources_cited_by_hypothesis": obj_list(self.sources),
@@ -112,8 +113,9 @@ class ResearchWorkflow:
         memory_budget: int = 1200,
         before_execute: Optional[Callable[[], None]] = None,  # e.g. unload the language model to free RAM
         figures_dir: Any = None,                              # folder of extracted figure captions
+        published_only: bool = False,                         # skip preprints when retrieving
     ) -> None:
-        self.rag = RagPipeline(retriever, char_budget=char_budget, figures_dir=figures_dir)
+        self.rag = RagPipeline(retriever, char_budget=char_budget, figures_dir=figures_dir, published_only=published_only)
         self.reviewer, self.hypothesis_agent, self.executor = reviewer, hypothesis_agent, executor
         self.llm_mode, self.top_k = llm_mode, top_k
         self.sandbox, self.max_repairs = sandbox, max_repairs

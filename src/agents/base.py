@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Iterable, List, Sequence, Tuple
 
-from src.models import RetrievedPaper
+from src.models import RetrievedPaper, publication_status
 
 CITATION_RE = re.compile(r"\[((?:arxiv|pubmed):[^\]\s]+)\]")
 
@@ -37,7 +37,7 @@ def format_evidence(items: Sequence[RetrievedPaper], max_abstract_chars: int = 1
         abstract = p.abstract if len(p.abstract) <= max_abstract_chars else p.abstract[:max_abstract_chars] + " ..."
         blocks.append(
             f"[{p.uid}] {p.title}\n"
-            f"Authors: {', '.join(p.authors[:5]) or 'n/a'} | Published: {p.published[:10] or 'n/a'} | URL: {p.url}\n"
+            f"Authors: {', '.join(p.authors[:5]) or 'n/a'} | Published: {p.published[:10] or 'n/a'} | Status: {publication_status(p)} | URL: {p.url}\n"
             f"Abstract: {abstract}"
             + (("\nFigure captions: " + " | ".join(item.captions)) if getattr(item, "captions", None) else "")
         )

@@ -5,7 +5,7 @@ import logging
 from typing import List
 
 from src.ingestion.paper_store import PaperStore
-from src.models import Paper, RetrievedPaper
+from src.models import Paper, RetrievedPaper, publication_status
 from src.retrieval.embeddings import Embedder
 from src.retrieval.vector_store import VectorStore
 
@@ -38,18 +38,21 @@ class PaperRetriever:
         self.vector_store.clear()
         return self.index_papers(self.paper_store.all())
 
-    def retrieve(self, query: str, k: int = 5) -> List[RetrievedPaper]:
-        """Top-k papers whose score is strictly above ``min_score``."""
+    def retrieve(self, query: str, k: int = 5, published_only: bool = False) -> List[RetrievedPaper]:
+        """Top-k papers whose score is strictly above ``min_score``. With ``published_only`` preprints are skipped
+        (the index is searched deeper first, so that k published papers can still be found)."""
         if not query or not query.strip():
             raise ValueError("Query must be a non-empty string.")
         query_vec = self.embedder.embed([query])[0]
         results: List[RetrievedPaper] = []
-        for uid, score in self.vector_store.search(query_vec, k):
+        for uid, score in self.vector_store.search(query_vec, k * 10 if published_only else k):
             if score <= self.min_score:
                 continue
             paper = self.paper_store.get(uid)
             if paper is None:
                 logger.warning("Vector index references unknown paper %s (run reindex)", uid)
                 continue
+            if published_only and publication_status(paper) != "published":
+                continue
             results.append(RetrievedPaper(paper=paper, score=score))
-        return results
+        return results[:k]
