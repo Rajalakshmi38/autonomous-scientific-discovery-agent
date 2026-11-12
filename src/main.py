@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import logging
 import sys
 from pathlib import Path
@@ -30,11 +31,14 @@ from src.ingestion.base import IngestionError
 from src.ingestion.figures import FigureError, describe_figure, download_pdf, extract_figures, paper_dir, save_manifest
 from src.ingestion.paper_store import PaperStore
 from src.ingestion.pubmed_client import PubMedClient
+from src.models import publication_status
+from src.rl.bandit import StrategyBandit, reward_from_record
 from src.llm.factory import available_providers, describe_llm, get_llm, get_provider_spec
 from src.llm.ollama_check import check_ollama, unload_model
 from src.memory.store import MemoryStore
 from src.retrieval.embeddings import EmbeddingError, get_embedder
 from src.retrieval.retriever import PaperRetriever
+from src.retrieval.milvus_store import MilvusVectorStore
 from src.retrieval.vector_store import NumpyVectorStore, VectorStoreError
 from src.utils.logging_config import setup_logging
 from src.utils.run_summary import format_summary, load_runs, summarize
@@ -47,7 +51,10 @@ logger = logging.getLogger("main")
 def build_retriever(settings: Settings) -> tuple[PaperStore, PaperRetriever]:
     store = PaperStore(settings.papers_db_path)
     embedder = get_embedder(settings)
-    vectors = NumpyVectorStore(settings.vector_dir, embedder.name)
+    if settings.vector_backend == "milvus":
+        vectors = MilvusVectorStore(settings.milvus_uri, embedder.name)
+    else:
+        vectors = NumpyVectorStore(settings.vector_dir, embedder.name)
     return store, PaperRetriever(store, embedder, vectors, settings.retrieval_min_score)
 
 
@@ -234,6 +241,24 @@ def cmd_evaluate(settings: Settings, args) -> int:
     return 0
 
 
+def cmd_bandit(settings: Settings, args) -> int:
+    path = settings.storage_dir / "bandit.json"
+    if args.reset:
+        path.unlink(missing_ok=True)
+        print("The bandit was reset.")
+        return 0
+    try:
+        bandit = StrategyBandit(path, epsilon=settings.bandit_epsilon)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+    print("\n".join(bandit.describe()))
+    best = bandit.best_arm()
+    if best is not None:
+        print(f"Best so far: retrieve {best} papers. This is a rough average over a few runs, not proof that it is better.")
+    return 0
+
+
 def cmd_check_system(settings: Settings, _args) -> int:
     info = get_system_info()
     rec = recommend(info)
@@ -353,14 +378,14 @@ def cmd_update(settings: Settings, _args) -> int:
 def cmd_search(settings: Settings, args) -> int:
     store, retriever = build_retriever(settings)
     try:
-        results = retriever.retrieve(args.query, k=args.k)
+        results = retriever.retrieve(args.query, k=args.k, published_only=args.published_only or settings.retrieval_published_only)
     finally:
         store.close()
     if not results:
         print("No relevant papers in the local index. Run 'ingest' first, or rephrase the query.")
         return 0
     for r in results:
-        print(f"{r.score:.3f}  [{r.paper.uid}] {r.paper.title[:80]}\n       {r.paper.url}")
+        print(f"{r.score:.3f}  [{r.paper.uid}] {r.paper.title[:80]} ({publication_status(r.paper)})\n       {r.paper.url}")
     return 0
 
 
@@ -409,6 +434,7 @@ def _make_workflow(settings: Settings, retriever, *, top_k: int, execute: bool, 
         max_repairs=settings.max_repair_retries,
         char_budget=settings.context_char_budget,
         critic_alpha=settings.critic_alpha,
+        published_only=settings.retrieval_published_only,
     )
 
 
@@ -426,12 +452,21 @@ def cmd_run(settings: Settings, args) -> int:
     store, retriever = build_retriever(settings)
     try:
         use_memory = not args.no_memory and settings.memory_char_budget > 0
-        workflow = _make_workflow(settings, retriever, top_k=args.k, execute=not args.no_execute, use_memory=use_memory)
+        k, bandit = args.k, None
+        if args.adaptive:
+            bandit = StrategyBandit(settings.storage_dir / "bandit.json", epsilon=settings.bandit_epsilon)
+            k, why = bandit.choose()
+            print(f"Adaptive strategy: retrieve {k} papers ({why}).")
+        workflow = _make_workflow(settings, retriever, top_k=k, execute=not args.no_execute, use_memory=use_memory)
         result = workflow.run(args.topic)
     finally:
         store.close()
 
     path = result.save(settings.runs_dir)
+    if bandit is not None:
+        reward = reward_from_record(json.loads(path.read_text(encoding="utf-8")))
+        bandit.update(k, reward)
+        print(f"Adaptive strategy: reward {reward:.2f} recorded for retrieving {k} papers.")
     print(f"\nStatus: {result.status}   (LLM: {result.llm_mode})")
     print(f"Execution: {result.execution_status}")
     for w in result.warnings:
@@ -520,10 +555,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("search", help="search the local index")
     p.add_argument("--query", required=True)
     p.add_argument("-k", type=int, default=5)
+    p.add_argument("--published-only", action="store_true", help="skip preprints (papers without a journal reference or DOI)")
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("run", help="run the multi-agent workflow")
     p.add_argument("--topic", required=True)
+    p.add_argument("--adaptive", action="store_true", help="let the bandit choose how many papers to retrieve and learn from the result")
     p.add_argument("-k", type=int, default=5, help="papers to retrieve (use 3 with small local models)")
     p.add_argument("--provider", choices=available_providers(), default=None,
                    help="override LLM_PROVIDER for this run")
@@ -549,6 +586,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="only list the chosen papers")
     p.add_argument("--ratings", default=None, help="summarize a filled-in rating sheet and exit")
     p.set_defaults(func=cmd_evaluate)
+
+    p = sub.add_parser("bandit", help="show what the strategy bandit has learned (or --reset it)")
+    p.add_argument("--reset", action="store_true")
+    p.set_defaults(func=cmd_bandit)
 
     p = sub.add_parser("dashboard", help="open the monitoring dashboard in the browser (needs Streamlit)")
     p.set_defaults(func=cmd_dashboard)
