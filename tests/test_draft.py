@@ -160,7 +160,7 @@ def test_the_model_summary_keeps_its_paragraphs_and_bullets():
     md = to_markdown(build_draft(r))
     assert "- [arxiv:1111.11111] first point" in md and "- [arxiv:2222.22222] second point" in md
     assert "**" not in md and "Evidence Summary" in md
-    assert r"\item [arxiv:1111.11111] first point" in to_latex(build_draft(r))
+    assert r"\item\relax [arxiv:1111.11111] first point" in to_latex(build_draft(r))
 
 
 def test_limitations_do_not_repeat_the_same_warning():
@@ -193,3 +193,10 @@ def test_a_matching_design_adds_no_mismatch_line_and_a_stored_one_is_not_repeate
     r = _logistic_design(rec())
     r["experiment"]["note"] = "Possible mismatch with the hypothesis: the experiment uses logistic_regression, which the hypothesis does not mention."
     assert to_markdown(build_draft(r)).count("Possible mismatch") == 1
+
+
+def test_latex_list_items_that_start_with_a_bracket_are_not_read_as_labels():
+    """\\item [text] makes LaTeX use the brackets as the item label, which drops the bullet."""
+    tex = to_latex(build_draft(rec()))
+    assert r"\item[" not in tex and r"\item [" not in tex
+    assert r"\item\relax [arxiv:1111.11111]" in tex and r"\item\relax [warning]" in tex
