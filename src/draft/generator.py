@@ -348,7 +348,7 @@ def to_latex(d: Draft) -> str:
     out = [r"\documentclass{article}", r"\usepackage[T1]{fontenc}", r"\usepackage{url}",
            rf"\title{{{tex_escape(d.title)}}}", r"\author{AI-assisted draft (unverified)}", r"\date{}",
            r"\begin{document}", r"\maketitle", r"\begin{itemize}"]
-    out += [rf"\item {tex_escape(b)}" for b in d.banners] + [r"\end{itemize}"]
+    out += [rf"\item\relax {tex_escape(b)}" for b in d.banners] + [r"\end{itemize}"]
     if d.kind == "paper":
         out += [r"\begin{abstract}", _tex_url_split(d.abstract), r"\end{abstract}"]
     else:
@@ -357,7 +357,7 @@ def to_latex(d: Draft) -> str:
         out.append(rf"\section{{{tex_escape(heading)}}}")
         for kind, content in blocks:
             if kind == "bullets":
-                out += [r"\begin{itemize}"] + [rf"\item {_tex_url_split(x)}" for x in content] + [r"\end{itemize}"]
+                out += [r"\begin{itemize}"] + [rf"\item\relax {_tex_url_split(x)}" for x in content] + [r"\end{itemize}"]
             elif kind == "quote":
                 out += [r"\begin{quote}", _tex_url_split(str(content)), r"\end{quote}"]
             elif kind == "code":
