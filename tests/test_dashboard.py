@@ -85,7 +85,7 @@ def test_citations_show_where_each_paper_was_cited_and_list_unknown_ids():
 def test_costs_are_time_and_attempts_not_money_or_tokens():
     cost = cost_summary(full())
     assert cost["total_seconds"] == 197.2 and cost["sandbox_seconds"] == 21.9 and cost["attempts"] == 1
-    assert "free local model" in cost["money"] and "Token counts are not recorded" in cost["note"]
+    assert cost["money"] == "None" and "Token counts are not recorded" in cost["note"]
     assert "test mode" in cost_summary(full(llm_mode="TEST MODE (mock model)"))["money"]
 
 
@@ -133,10 +133,13 @@ def test_page_shows_the_steps_and_writes_a_draft(app_env):
     (app_env / "run_20260101_000001.json").write_text(json.dumps(full()), encoding="utf-8")
     at = AppTest.from_file(APP, default_timeout=60).run()
     assert not at.exception
+    next(b for b in at.sidebar.button if b.label == "Logic tree").click().run()                      # each sidebar item is its own page
     labels = [e.label for e in at.expander]
     assert len(labels) == 6 and any(l.startswith("3. Hypothesis: WARNING") for l in labels)
+    next(b for b in at.sidebar.button if b.label == "Literature Citations").click().run()            # the sections are now chosen in the sidebar
     assert any("arxiv:9999.99999" in e.value for e in at.error)          # cited but never retrieved
-    at.button[0].click().run()
+    next(b for b in at.sidebar.button if b.label == "Draft").click().run()
+    next(b for b in at.button if b.label == "Write draft").click().run()       # found by label: the page now has other buttons too
     assert not at.exception and any("written" in s.value for s in at.success)
 
 
@@ -144,4 +147,5 @@ def test_page_labels_a_test_mode_run(app_env):
     from streamlit.testing.v1 import AppTest
     (app_env / "run_20260101_000001.json").write_text(json.dumps(full(llm_mode="TEST MODE (mock model)")), encoding="utf-8")
     at = AppTest.from_file(APP, default_timeout=60).run()
+    next(b for b in at.sidebar.button if b.label == "Logic tree").click().run()
     assert not at.exception and any("TEST MODE" in w.value for w in at.warning)

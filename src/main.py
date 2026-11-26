@@ -4,7 +4,7 @@ Commands (run from the project root):
     python -m src.main status
     python -m src.main ingest  --query "graph neural networks" --max-results 10
     python -m src.main search  --query "graph neural networks" -k 5
-    python -m src.main run     --topic "graph neural networks" [--no-execute]
+    python -m src.main run     "graph neural networks" [--no-execute]      (or: run --topic "...")
     python -m src.main sandbox-build | sandbox-status | sandbox-test
     python -m src.main reindex
     python -m src.main check-system     # can my PC run a local LLM?
@@ -17,8 +17,9 @@ import dataclasses
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from config.settings import PROJECT_ROOT, ConfigError, Settings, load_settings
 from src.agents.code_executor import CodeExecutorAgent
@@ -43,7 +44,7 @@ from src.retrieval.vector_store import NumpyVectorStore, VectorStoreError
 from src.utils.logging_config import setup_logging
 from src.utils.run_summary import format_summary, load_runs, summarize
 from src.utils.system_info import get_system_info, recommend
-from src.workflow import ResearchWorkflow
+from src.workflow import ProgressEvent, ResearchWorkflow, WorkflowResult
 
 logger = logging.getLogger("main")
 
@@ -195,22 +196,55 @@ def cmd_dashboard(_settings: Settings, _args) -> int:
     return subprocess.call([sys.executable, "-m", "streamlit", "run", str(app)], cwd=str(PROJECT_ROOT))
 
 
-def cmd_evaluate(settings: Settings, args) -> int:
-    from src.evaluation.holdout import evaluate_heldout, pick_heldout, summarize_ratings
-    if args.ratings:
-        print(summarize_ratings(Path(args.ratings)))
-        return 0
+def pick_evaluation_papers(settings: Settings, *, category: str = "cs.LG", n: int = 5, pool: int = 30):
+    """Choose recent papers that are newer than everything indexed and not in the index. Returns (papers, cutoff date).
+    `evaluate` and the dashboard both call this. Raises ValueError when the index is empty."""
+    from src.evaluation.holdout import pick_heldout
     store = PaperStore(settings.papers_db_path)
     try:
         indexed = store.all()
     finally:
         store.close()
     if not indexed:
-        print("The index is empty. Ingest papers first, so there is something to hold papers out from.")
-        return 1
+        raise ValueError("The index is empty. Ingest papers first, so there is something to hold papers out from.")
     client = ArxivClient(timeout=settings.arxiv_timeout_seconds, retries=settings.arxiv_retries,
                          delay_seconds=settings.arxiv_delay_seconds, contact=settings.arxiv_contact, raw_dir=settings.raw_dir)
-    chosen, cutoff = pick_heldout(client.latest(args.category, max_results=args.pool), indexed, args.n)
+    return pick_heldout(client.latest(category, max_results=pool), indexed, n)
+
+
+def run_evaluation(settings: Settings, chosen: list, cutoff: str, *, k: int = 3,
+                   on_progress: Optional[Callable[[ProgressEvent], None]] = None,
+                   on_paper: Optional[Callable[[int, int, str], None]] = None) -> tuple:
+    """Run the agent on each held-out paper's title and write the evaluation folder. Returns (folder, outcome).
+    `evaluate` and the dashboard both call this. `on_paper(i, total, title)` is called before each paper starts."""
+    import time
+    from src.evaluation.holdout import evaluate_heldout
+    out_dir = settings.storage_dir / "evaluation" / f"holdout_{time.strftime('%Y%m%d_%H%M%S')}"
+    store, retriever = build_retriever(settings)
+    try:
+        workflow = _make_workflow(settings, retriever, top_k=k, execute=True, use_memory=False, on_progress=on_progress)
+        titles = {p.title: i for i, p in enumerate(chosen, 1)}
+
+        def run_topic(topic: str):
+            if on_paper is not None:
+                on_paper(titles.get(topic, 0), len(chosen), topic)
+            return workflow.run(topic).save(settings.runs_dir)
+        outcome = evaluate_heldout(chosen, run_topic, get_embedder(settings).embed, out_dir, cutoff)
+    finally:
+        store.close()
+    return out_dir, outcome
+
+
+def cmd_evaluate(settings: Settings, args) -> int:
+    from src.evaluation.holdout import summarize_ratings
+    if args.ratings:
+        print(summarize_ratings(Path(args.ratings)))
+        return 0
+    try:
+        chosen, cutoff = pick_evaluation_papers(settings, category=args.category, n=args.n, pool=args.pool)
+    except ValueError as exc:
+        print(exc)
+        return 1
     print(f"Held-out papers must be newer than the newest indexed paper ({cutoff}) and not in the index.")
     if not chosen:
         print("No such paper was found. Try a larger --pool or another --category.")
@@ -224,16 +258,8 @@ def cmd_evaluate(settings: Settings, args) -> int:
         return 0
     if not _llm_ready(settings):
         return 1
-    import time
-    out_dir = settings.storage_dir / "evaluation" / f"holdout_{time.strftime('%Y%m%d_%H%M%S')}"
     print(f"Running {len(chosen)} topic(s). Each takes several minutes. Docker Desktop and Ollama must stay running.")
-    store, retriever = build_retriever(settings)
-    try:
-        workflow = _make_workflow(settings, retriever, top_k=args.k, execute=True, use_memory=False)
-        outcome = evaluate_heldout(chosen, lambda topic: workflow.run(topic).save(settings.runs_dir),
-                                   get_embedder(settings).embed, out_dir, cutoff)
-    finally:
-        store.close()
+    out_dir, outcome = run_evaluation(settings, chosen, cutoff, k=args.k)
     s = outcome["summary"]
     print(f"\nFinished {s['runs_finished']} of {s['papers']} run(s). Results are in {out_dir}")
     print(f"  rating_sheet.csv  (fill in the 1 to 5 columns, then: python -m src.main evaluate --ratings FILE)")
@@ -302,21 +328,33 @@ def _search_source(client, entry_source: str, query: str, max_results: int, cate
     return client.search(query, max_results=max_results)
 
 
-def cmd_ingest(settings: Settings, args) -> int:
-    if args.source == "pubmed" and args.category:
-        print("--category only works with the arxiv source.")
-        return 1
-    client = _make_source(settings, args.source)
-    papers = _search_source(client, args.source, args.query, args.max_results, args.category)
+def ingest_papers(settings: Settings, query: str, *, source: str = "arxiv", max_results: int = 10,
+                  category: Optional[str] = None) -> list:
+    """Fetch papers, store them and add them to the search index. `ingest` and the dashboard both call this.
+    Returns the papers found (an empty list when the source returned none)."""
+    if source == "pubmed" and category:
+        raise ValueError("--category only works with the arxiv source.")
+    client = _make_source(settings, source)
+    papers = _search_source(client, source, query, max_results, category)
     if not papers:
-        print(f"{args.source} returned no papers for this query. Try different or fewer keywords.")
-        return 0
+        return []
     store, retriever = build_retriever(settings)
     try:
         store.upsert_many(papers)
         retriever.index_papers(papers)
     finally:
         store.close()
+    return papers
+
+
+def cmd_ingest(settings: Settings, args) -> int:
+    if args.source == "pubmed" and args.category:
+        print("--category only works with the arxiv source.")
+        return 1
+    papers = ingest_papers(settings, args.query, source=args.source, max_results=args.max_results, category=args.category)
+    if not papers:
+        print(f"{args.source} returned no papers for this query. Try different or fewer keywords.")
+        return 0
     print(f"Stored and indexed {len(papers)} paper(s):")
     for p in papers:
         print(f"  [{p.uid}] {p.title[:90]} ({p.year})")
@@ -402,19 +440,28 @@ def cmd_reindex(settings: Settings, _args) -> int:
     return 0
 
 
-def _llm_ready(settings: Settings) -> bool:
-    """True when the chosen model can be used. Prints the reason when it cannot."""
+def llm_problem(settings: Settings) -> Optional[str]:
+    """Why the chosen model cannot be used right now (for example Ollama is not running), or None when it is ready."""
     spec = get_provider_spec(settings.llm_provider)
     if spec.needs_local_server:
         status = check_ollama(settings.ollama_base_url, settings.ollama_model)
         if not status.ok:
-            print(f"Cannot start: {status.message}", file=sys.stderr)
-            print("Tip: run with --provider test to try the pipeline in clearly labelled mock mode.", file=sys.stderr)
-            return False
+            return status.message
+    return None
+
+
+def _llm_ready(settings: Settings) -> bool:
+    """True when the chosen model can be used. Prints the reason when it cannot."""
+    problem = llm_problem(settings)
+    if problem:
+        print(f"Cannot start: {problem}", file=sys.stderr)
+        print("Tip: run with --provider test to try the pipeline in clearly labelled mock mode.", file=sys.stderr)
+        return False
     return True
 
 
-def _make_workflow(settings: Settings, retriever, *, top_k: int, execute: bool, use_memory: bool) -> ResearchWorkflow:
+def _make_workflow(settings: Settings, retriever, *, top_k: int, execute: bool, use_memory: bool,
+                   on_progress: Optional[Callable[[ProgressEvent], None]] = None) -> ResearchWorkflow:
     spec = get_provider_spec(settings.llm_provider)
     llm = get_llm(settings)
     free_ram = spec.needs_local_server and settings.unload_model_before_run
@@ -435,13 +482,66 @@ def _make_workflow(settings: Settings, retriever, *, top_k: int, execute: bool, 
         char_budget=settings.context_char_budget,
         critic_alpha=settings.critic_alpha,
         published_only=settings.retrieval_published_only,
+        on_progress=on_progress,
     )
+
+
+@dataclass
+class ResearchRun:
+    """What one finished research run produced."""
+    result: WorkflowResult
+    path: Path                      # the saved run record, storage/runs/run_<timestamp>.json
+    k: int                          # papers retrieved
+    reward: Optional[float] = None  # set only for adaptive runs
+
+
+def run_research(settings: Settings, topic: str, *, k: int = 5, adaptive: bool = False, execute: bool = True,
+                 use_memory: bool = True, on_progress: Optional[Callable[[ProgressEvent], None]] = None,
+                 notify: Callable[[str], None] = lambda _msg: None) -> ResearchRun:
+    """THE research pipeline entry point: ``python -m src.main run`` and the Streamlit dashboard both call this.
+
+    It retrieves papers, runs the six workflow steps, saves the run record and (for adaptive runs) updates the bandit.
+    The caller checks that the model is usable first (see ``llm_problem``). ``on_progress`` receives a ProgressEvent as each
+    step really starts and ends; ``notify`` receives plain-text notes (the CLI prints them).
+    """
+    store, retriever = build_retriever(settings)
+    try:
+        use_memory = use_memory and settings.memory_char_budget > 0
+        bandit = None
+        if adaptive:
+            bandit = StrategyBandit(settings.storage_dir / "bandit.json", epsilon=settings.bandit_epsilon)
+            k, why = bandit.choose()
+            notify(f"Adaptive strategy: retrieve {k} papers ({why}).")
+        workflow = _make_workflow(settings, retriever, top_k=k, execute=execute, use_memory=use_memory, on_progress=on_progress)
+        result = workflow.run(topic)
+    finally:
+        store.close()
+
+    path = result.save(settings.runs_dir)
+    reward = None
+    if bandit is not None:
+        reward = reward_from_record(json.loads(path.read_text(encoding="utf-8")))
+        bandit.update(k, reward)
+        notify(f"Adaptive strategy: reward {reward:.2f} recorded for retrieving {k} papers.")
+    return ResearchRun(result, path, k, reward)
+
+
+def _topic_from_args(args) -> str:
+    """`run --topic "X"` (original form) and `run "X"` both work; giving two different topics is an error."""
+    positional, flagged = getattr(args, "topic_positional", None), getattr(args, "topic", None)
+    if positional and flagged and positional.strip() != flagged.strip():
+        raise ValueError("Give the topic once: either run \"TOPIC\" or run --topic \"TOPIC\".")
+    topic = flagged or positional
+    if not topic or not topic.strip():
+        raise ValueError("A research topic is required: python -m src.main run \"TOPIC\"")
+    return topic
 
 
 def cmd_run(settings: Settings, args) -> int:
     if args.provider:
         get_provider_spec(args.provider)   # validates the name
         settings = dataclasses.replace(settings, llm_provider=args.provider)
+    topic = _topic_from_args(args)
     if not _llm_ready(settings):
         return 1
     if settings.is_test_mode:
@@ -449,24 +549,9 @@ def cmd_run(settings: Settings, args) -> int:
         print("TEST MODE: the LLM is a rule-based mock. Output below is NOT genuine reasoning.")
         print("For real (free, local) model output: install Ollama and see the README.")
         print("=" * 72)
-    store, retriever = build_retriever(settings)
-    try:
-        use_memory = not args.no_memory and settings.memory_char_budget > 0
-        k, bandit = args.k, None
-        if args.adaptive:
-            bandit = StrategyBandit(settings.storage_dir / "bandit.json", epsilon=settings.bandit_epsilon)
-            k, why = bandit.choose()
-            print(f"Adaptive strategy: retrieve {k} papers ({why}).")
-        workflow = _make_workflow(settings, retriever, top_k=k, execute=not args.no_execute, use_memory=use_memory)
-        result = workflow.run(args.topic)
-    finally:
-        store.close()
-
-    path = result.save(settings.runs_dir)
-    if bandit is not None:
-        reward = reward_from_record(json.loads(path.read_text(encoding="utf-8")))
-        bandit.update(k, reward)
-        print(f"Adaptive strategy: reward {reward:.2f} recorded for retrieving {k} papers.")
+    finished = run_research(settings, topic, k=args.k, adaptive=args.adaptive, execute=not args.no_execute,
+                            use_memory=not args.no_memory, notify=print)
+    result, path = finished.result, finished.path
     print(f"\nStatus: {result.status}   (LLM: {result.llm_mode})")
     print(f"Execution: {result.execution_status}")
     for w in result.warnings:
@@ -559,7 +644,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("run", help="run the multi-agent workflow")
-    p.add_argument("--topic", required=True)
+    p.add_argument("topic_positional", nargs="?", default=None, metavar="TOPIC", help="research topic (same as --topic)")
+    p.add_argument("--topic", default=None)
     p.add_argument("--adaptive", action="store_true", help="let the bandit choose how many papers to retrieve and learn from the result")
     p.add_argument("-k", type=int, default=5, help="papers to retrieve (use 3 with small local models)")
     p.add_argument("--provider", choices=available_providers(), default=None,

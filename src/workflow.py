@@ -28,6 +28,82 @@ from src.retrieval.retriever import PaperRetriever
 
 logger = logging.getLogger(__name__)
 
+# The six pipeline steps in order: (key, title). The dashboard shows the same titles.
+PIPELINE_STEPS = [("retrieve", "Retrieve papers"), ("review", "Literature review"), ("hypothesis", "Hypothesis"),
+                  ("experiment_design", "Experiment design"), ("execute", "Sandbox execution"), ("critic", "Statistical critic")]
+
+
+@dataclass
+class ProgressEvent:
+    """One real moment in a run, sent to the optional ``on_progress`` callback. Nothing here is estimated.
+
+    phase: running (the step just started) | done | warning (finished with a caveat) | skipped | failed (raised an error).
+    """
+    step: str
+    phase: str
+    seconds: Optional[float] = None
+    message: str = ""
+
+    @property
+    def index(self) -> int:
+        return [k for k, _ in PIPELINE_STEPS].index(self.step) + 1
+
+    @property
+    def total(self) -> int:
+        return len(PIPELINE_STEPS)
+
+    @property
+    def title(self) -> str:
+        return dict(PIPELINE_STEPS)[self.step]
+
+
+def _notify(callback: Optional[Callable[[ProgressEvent], None]], event: ProgressEvent) -> None:
+    """A broken progress listener must never break the research run. (Only ``Exception`` is caught, so a UI that wants
+    to cancel the run by raising a BaseException still can.)"""
+    if callback is None:
+        return
+    try:
+        callback(event)
+    except Exception as exc:
+        logger.warning("Progress callback failed (ignored): %s", exc)
+
+
+def _step_outcome(name: str, state: dict) -> tuple[str, str]:
+    """What actually happened in a step that did not raise, read from the real pipeline state."""
+    if name != "retrieve" and state.get("stop"):
+        return "skipped", "Skipped because no relevant papers were retrieved."
+    if name == "retrieve":
+        n = len(state.get("evidence") or [])
+        return ("done", f"{n} paper(s) retrieved.") if n else ("warning", "No relevant papers found in the local index.")
+    if name in ("review", "hypothesis"):
+        item = state.get(name)
+        unknown, cited = list(getattr(item, "unknown_citations", []) or []), list(getattr(item, "cited_ids", []) or [])
+        if unknown:
+            return "warning", f"Cites {len(unknown)} paper id(s) that were not retrieved."
+        if not cited:
+            return "warning", "Cites no retrieved paper by id."
+        return "done", f"Cites {len(cited)} retrieved paper(s)."
+    if name == "experiment_design":
+        exp = state.get("experiment")
+        if exp is None:
+            return "warning", "No experiment was prepared."
+        if exp.note or not exp.syntax_ok:
+            return "warning", exp.note or "The generated code has a syntax error."
+        return "done", exp.design_summary or "Experiment code prepared."
+    if name == "execute":
+        outcome = state.get("execution")
+        if outcome is None:
+            return "skipped", "Execution was disabled for this run."
+        if outcome.final_status == Status.SANDBOX_UNAVAILABLE:
+            return "skipped", outcome.message or "The sandbox is not available."
+        if outcome.final_status == Status.SUCCESS:
+            return "done", f"Sandbox run succeeded ({len(outcome.attempts)} attempt(s))."
+        return "warning", f"Ended with {outcome.final_status} after {len(outcome.attempts)} attempt(s)."
+    if name == "critic":
+        report = state.get("critic")
+        return ("done", f"Verdict: {report.verdict}.") if report is not None else ("skipped", "No experiment output to check.")
+    return "done", ""
+
 
 @dataclass
 class WorkflowResult:
@@ -114,6 +190,7 @@ class ResearchWorkflow:
         before_execute: Optional[Callable[[], None]] = None,  # e.g. unload the language model to free RAM
         figures_dir: Any = None,                              # folder of extracted figure captions
         published_only: bool = False,                         # skip preprints when retrieving
+        on_progress: Optional[Callable[[ProgressEvent], None]] = None,   # called as each step starts and ends
     ) -> None:
         self.rag = RagPipeline(retriever, char_budget=char_budget, figures_dir=figures_dir, published_only=published_only)
         self.reviewer, self.hypothesis_agent, self.executor = reviewer, hypothesis_agent, executor
@@ -121,24 +198,40 @@ class ResearchWorkflow:
         self.sandbox, self.max_repairs = sandbox, max_repairs
         self.critic = StatisticalCritic(critic_alpha)
         self.memory, self.memory_budget, self.before_execute = memory, memory_budget, before_execute
+        self.on_progress = on_progress
         self._pipeline = (
-            RunnableLambda(self._timed("retrieve", self._step_retrieve))
-            | RunnableLambda(self._timed("review", self._step_review))
-            | RunnableLambda(self._timed("hypothesis", self._step_hypothesis))
-            | RunnableLambda(self._timed("experiment_design", self._step_experiment))
-            | RunnableLambda(self._timed("execute", self._step_execute))
-            | RunnableLambda(self._timed("critic", self._step_critic))
+            RunnableLambda(self._timed("retrieve", self._step_retrieve, self._emit))
+            | RunnableLambda(self._timed("review", self._step_review, self._emit))
+            | RunnableLambda(self._timed("hypothesis", self._step_hypothesis, self._emit))
+            | RunnableLambda(self._timed("experiment_design", self._step_experiment, self._emit))
+            | RunnableLambda(self._timed("execute", self._step_execute, self._emit))
+            | RunnableLambda(self._timed("critic", self._step_critic, self._emit))
         )
 
+    def _emit(self, event: ProgressEvent) -> None:
+        _notify(self.on_progress, event)
+
     @staticmethod
-    def _timed(name: str, step: Callable[[dict], dict]) -> Callable[[dict], dict]:
-        """Record how long each step took (shown on the dashboard)."""
+    def _timed(name: str, step: Callable[[dict], dict], notify: Optional[Callable[[ProgressEvent], None]] = None) -> Callable[[dict], dict]:
+        """Record how long each step took (shown on the dashboard) and, if asked, report the real start and end."""
         def wrapper(state: dict) -> dict:
             started = time.monotonic()
+            _notify(notify, ProgressEvent(name, "running"))
+            failure: Optional[Exception] = None
             try:
-                return step(state)
+                state = step(state)
+                return state
+            except Exception as exc:
+                failure = exc
+                raise
             finally:
-                state.setdefault("timings", {})[name] = round(time.monotonic() - started, 2)
+                seconds = round(time.monotonic() - started, 2)
+                state.setdefault("timings", {})[name] = seconds
+                if failure is not None:
+                    _notify(notify, ProgressEvent(name, "failed", seconds, f"{type(failure).__name__}: {failure}"))
+                else:
+                    phase, message = _step_outcome(name, state)
+                    _notify(notify, ProgressEvent(name, phase, seconds, message))
         return wrapper
 
     # ---- steps ------------------------------------------------------------

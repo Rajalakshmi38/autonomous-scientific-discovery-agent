@@ -1,0 +1,7 @@
+# Colours of the dashboard. The blue is used for buttons, the open menu item, checkboxes and links.
+# Light and dark are set separately, so both theme options of the app keep working.
+[theme.light]
+primaryColor = "#2f6fed"
+
+[theme.dark]
+primaryColor = "#2f6fed"

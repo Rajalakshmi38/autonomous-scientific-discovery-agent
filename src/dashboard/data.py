@@ -157,7 +157,7 @@ def cost_summary(record: Dict[str, Any]) -> Dict[str, Any]:
     test_mode = "TEST MODE" in str(record.get("llm_mode", ""))
     return {"step_seconds": secs, "total_seconds": round(sum(secs.values()), 1), "sandbox_seconds": sandbox,
             "attempts": len(attempts), "model": record.get("llm_mode"),
-            "money": "none (test mode)" if test_mode else "none (free local model)",
+            "money": "none (test mode)" if test_mode else "None",
             "note": "Token counts are not recorded; only time and attempts."}
 
 
